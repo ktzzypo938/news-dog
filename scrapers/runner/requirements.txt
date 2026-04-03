@@ -1,0 +1,6 @@
+functions-framework==3.*
+requests==2.*
+beautifulsoup4==4.*
+lxml==5.*
+python-dateutil==2.*
+PyYAML==6.*

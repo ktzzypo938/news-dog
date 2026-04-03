@@ -1,0 +1,33 @@
+# 新聞爬蟲來源設定檔
+# 新增來源只需：
+#   1. 在此加一個 entry
+#   2. 在 sources/ 目錄新增對應的 {module}.py
+#   3. 執行 deploy_runner.sh
+
+sources:
+  CNA:
+    name: 中央通訊社
+    module: cna
+    enabled: true
+
+  CTI:
+    name: 中天新聞
+    module: cti
+    enabled: true
+    options:
+      ssl_verify: false   # CTI 有 SSL 憑證問題
+
+  LTN:
+    name: 自由時報
+    module: ltn
+    enabled: true
+
+  SET:
+    name: 三立新聞
+    module: set
+    enabled: true
+
+  UDN:
+    name: 聯合新聞網
+    module: udn
+    enabled: true
