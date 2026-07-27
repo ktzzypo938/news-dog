@@ -3,13 +3,20 @@
 # Cloud Scheduler 自動設定腳本 (每 15 分鐘跑一次)
 
 REGION="asia-east1"
-SCRAPERS=("cna" "cti" "ltn" "set" "udn")
+SCRAPERS=("tvbs" "pts" "ebc" "ettoday" "chinatimes" "ttv" "udn" "cts" "ltn" "ftv" "storm" "set" "cna" "cti")
+RETIRED_SCRAPERS=("nexttv" "mnews" "globalnews" "ctwant" "rwnews" "cnews" "tnl" "reporter" "peoplenews" "era" "new7" "cw" "businessweekly" "commercialtimes" "economic" "ctv" "nownews" "newtalk" "upmedia" "mirror" "taisounds")
 PROJECT_NUMBER="632027619686"
 SERVICE_ACCOUNT="${PROJECT_NUMBER}-compute@developer.gserviceaccount.com"
 
 echo "------------------------------------"
 echo "開始設定 Cloud Scheduler 排程..."
 echo "------------------------------------"
+
+for SCRAPER in "${RETIRED_SCRAPERS[@]}"; do
+    JOB_NAME="job-scraper-$SCRAPER"
+    echo "停用舊來源排程: $JOB_NAME"
+    gcloud scheduler jobs delete "$JOB_NAME" --location="$REGION" --quiet 2>/dev/null || true
+done
 
 for SCRAPER in "${SCRAPERS[@]}"; do
     NAME="scraper-$SCRAPER"

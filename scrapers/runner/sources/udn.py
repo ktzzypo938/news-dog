@@ -1,12 +1,10 @@
 """聯合新聞網爬蟲"""
 import re
-from datetime import datetime
 from bs4 import BeautifulSoup
-from dateutil import parser
 import base
 
 SOURCE_CODE = 'UDN'
-CAT_IDS = ['1', '2', '5']  # 要聞/政治、社會、國際
+CAT_IDS = ['1', '2', '9', '5']  # 要聞/政治、社會、生活、國際
 
 
 def get_list_urls(session):
@@ -60,12 +58,14 @@ def scrape_article(session, url):
         if content_node:
             for tag in content_node.select('script, style, .inline-ad, .article-content__info'):
                 tag.decompose()
+            base.remove_promo_blocks(content_node)
             clean_text = content_node.get_text("\n", strip=True)
         else:
             clean_text = ""
 
-        time_node = soup.select_one('time.article-content__time')
-        published_at = _parse_time(time_node.get_text(strip=True) if time_node else "")
+        published_at = base.extract_published_at(soup, [
+            ('time.article-content__time', None),
+        ])
 
         result = {
             "source": SOURCE_CODE, "url": url,
@@ -80,10 +80,3 @@ def scrape_article(session, url):
     except Exception as e:
         print(f"[{SOURCE_CODE}] Error scraping {url}: {e}")
         return None
-
-
-def _parse_time(time_str):
-    try:
-        return parser.parse(time_str).strftime('%Y-%m-%d %H:%M:%S')
-    except Exception:
-        return datetime.now().strftime('%Y-%m-%d %H:%M:%S')

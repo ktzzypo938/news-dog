@@ -1,18 +1,16 @@
 """中天新聞爬蟲（需要 ssl_verify=false）"""
-import json
 import re
-from datetime import datetime
 from bs4 import BeautifulSoup
-from dateutil import parser
 import base
 
 SOURCE_CODE = 'CTI'
-ALLOWED_CATS = ['政治', '社會', '國際', '要聞', '全球']
+ALLOWED_CATS = ['政治', '社會', '生活', '國際', '要聞', '全球']
 
 # CTI 分類 topic 頁（要聞、社會、國際）
 TOPIC_PAGES = [
     '/news/topics/LaDQVMegmZ',  # 要聞
     '/news/topics/dnbepPejZB',  # 社會
+    '/news/topics/A65QZ5exYy',  # 生活
     '/news/topics/Wqk9W8eD3M',  # 國際
 ]
 
@@ -82,11 +80,16 @@ def scrape_article(session, url):
         if content_node:
             for tag in content_node.select('script, style, .ad-container, .related-news'):
                 tag.decompose()
+            base.remove_promo_blocks(content_node)
             clean_text = content_node.get_text("\n", strip=True)
         else:
             clean_text = ""
 
-        published_at = _parse_time(soup)
+        published_at = base.extract_published_at(soup, [
+            ('time.pub-date', 'datetime'),
+            ('time.pub-date', None),
+            ('time', None),
+        ])
 
         result = {
             "source": SOURCE_CODE, "url": url,
@@ -101,34 +104,3 @@ def scrape_article(session, url):
     except Exception as e:
         print(f"[{SOURCE_CODE}] Error scraping {url}: {e}")
         return None
-
-
-def _parse_time(soup):
-    # 1. article:published_time meta
-    node = soup.select_one('meta[property="article:published_time"]')
-    if node and node.get('content'):
-        try:
-            return parser.parse(node['content']).strftime('%Y-%m-%d %H:%M:%S')
-        except Exception:
-            pass
-
-    # 2. JSON-LD datePublished
-    try:
-        ld_node = soup.select_one('script[type="application/ld+json"]')
-        if ld_node:
-            ld_data = json.loads(ld_node.string)
-            if isinstance(ld_data, dict) and ld_data.get('datePublished'):
-                return parser.parse(ld_data['datePublished']).strftime('%Y-%m-%d %H:%M:%S')
-    except Exception:
-        pass
-
-    # 3. time element
-    time_node = soup.select_one('time.pub-date') or soup.select_one('time')
-    if time_node:
-        time_str = time_node.get('datetime') or time_node.get_text(strip=True)
-        try:
-            return parser.parse(time_str).strftime('%Y-%m-%d %H:%M:%S')
-        except Exception:
-            pass
-
-    return datetime.now().strftime('%Y-%m-%d %H:%M:%S')

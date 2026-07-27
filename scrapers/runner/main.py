@@ -13,16 +13,13 @@ import os
 import importlib
 import urllib3
 
-import yaml
 import functions_framework
 
 import base
 
 
 def load_config():
-    config_path = os.path.join(os.path.dirname(__file__), 'sources.yml')
-    with open(config_path, 'r', encoding='utf-8') as f:
-        return yaml.safe_load(f)
+    return base.load_sources_config()
 
 
 @functions_framework.http

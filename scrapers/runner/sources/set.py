@@ -1,12 +1,10 @@
 """三立新聞爬蟲"""
 import re
-from datetime import datetime
 from bs4 import BeautifulSoup
-from dateutil import parser
 import base
 
 SOURCE_CODE = 'SET'
-GROUP_IDS = ['6', '41', '5']  # 政治、社會、國際
+GROUP_IDS = ['6', '41', '4', '5']  # 政治、社會、生活、國際
 
 
 def get_list_urls(session):
@@ -20,22 +18,24 @@ def get_list_urls(session):
             links = (soup.select('h3.view-li-title a')
                      or soup.select('div.view-li-title a')
                      or soup.select('div.newsItems h3 a')
-                     or soup.select('a[href*="/News.aspx"]'))
+                     or soup.select('a[href*="/News.aspx"], a[href*="/news/"]'))
 
             print(f"[{SOURCE_CODE}] Found {len(links)} links in group {group_id}")
 
             for a in links:
                 href = a.get('href', '')
-                if not href or '/News.aspx' not in href:
+                if not href:
                     continue
                 full_url = href if href.startswith('http') else "https://www.setn.com" + href
-                # 保留 NewsID 參數
+                # 舊格式：/News.aspx?NewsID=123（保留 NewsID 參數）
                 m = re.search(r'NewsID=(\d+)', full_url)
                 if m:
-                    full_url = f"https://www.setn.com/News.aspx?NewsID={m.group(1)}"
-                else:
-                    full_url = full_url.split('?')[0].split('#')[0].rstrip('/')
-                all_urls.append(full_url)
+                    all_urls.append(f"https://www.setn.com/News.aspx?NewsID={m.group(1)}")
+                    continue
+                # 新格式：/news/1879418
+                full_url = full_url.split('?')[0].split('#')[0].rstrip('/')
+                if re.match(r'^https://www\.setn\.com/news/\d+$', full_url):
+                    all_urls.append(full_url)
         except Exception as e:
             print(f"[{SOURCE_CODE}] Failed to fetch group {group_id}: {e}")
 
@@ -46,6 +46,8 @@ def get_list_urls(session):
             resp = session.get('https://www.setn.com/', timeout=15)
             for news_id in set(re.findall(r'NewsID=(\d+)', resp.text)):
                 all_urls.append(f"https://www.setn.com/News.aspx?NewsID={news_id}")
+            for news_id in set(re.findall(r'setn\.com/news/(\d+)', resp.text)):
+                all_urls.append(f"https://www.setn.com/news/{news_id}")
         except Exception as e:
             print(f"[{SOURCE_CODE}] Failed to fetch homepage: {e}")
 
@@ -78,15 +80,22 @@ def scrape_article(session, url):
 
         content_node = (soup.select_one('[itemprop="articleBody"]')
                         or soup.select_one('div#Content1')
+                        or soup.select_one('#newsContent')          # 2026 新版文章頁
+                        or soup.select_one('.article_content_area')
                         or soup.select_one('article'))
         if content_node:
             for tag in content_node.select('script, style, .article-ads, .fb-quote'):
                 tag.decompose()
+            base.remove_promo_blocks(content_node)
             clean_text = content_node.get_text("\n", strip=True)
         else:
             clean_text = ""
 
-        published_at = _parse_time(soup)
+        published_at = base.extract_published_at(soup, [
+            ('time.page_date', None),
+            ('time.page-date', None),
+            ('span.date', None),
+        ])
 
         result = {
             "source": SOURCE_CODE, "url": url,
@@ -101,25 +110,3 @@ def scrape_article(session, url):
     except Exception as e:
         print(f"[{SOURCE_CODE}] Error scraping {url}: {e}")
         return None
-
-
-def _parse_time(soup):
-    # 1. article:published_time meta
-    node = soup.select_one('meta[property="article:published_time"]')
-    if node and node.get('content'):
-        try:
-            return parser.parse(node['content']).strftime('%Y-%m-%d %H:%M:%S')
-        except Exception:
-            pass
-
-    # 2. time element (多個備用選擇器)
-    time_node = (soup.select_one('time.page_date')
-                 or soup.select_one('time.page-date')
-                 or soup.select_one('span.date'))
-    if time_node:
-        try:
-            return parser.parse(time_node.get_text(strip=True)).strftime('%Y-%m-%d %H:%M:%S')
-        except Exception:
-            pass
-
-    return datetime.now().strftime('%Y-%m-%d %H:%M:%S')

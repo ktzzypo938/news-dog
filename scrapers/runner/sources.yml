@@ -31,3 +31,148 @@ sources:
     name: 聯合新聞網
     module: udn
     enabled: true
+
+  TVBS:
+    name: TVBS
+    module: tvbs
+    enabled: true
+
+  EBC:
+    name: 東森新聞
+    module: ebc
+    enabled: true
+
+  FTV:
+    name: 民視新聞
+    module: ftv
+    enabled: true
+
+  PTS:
+    name: 公視新聞
+    module: pts
+    enabled: true
+
+  CTS:
+    name: 華視新聞
+    module: cts
+    enabled: true
+
+  TTV:
+    name: 台視新聞
+    module: ttv
+    enabled: true
+
+  NEXTTV:
+    name: 壹電視
+    module: nexttv
+    enabled: false
+
+  MNEWS:
+    name: 鏡新聞
+    module: mnews
+    enabled: false
+
+  GLOBALNEWS:
+    name: 寰宇新聞
+    module: globalnews
+    enabled: false
+
+  CTWANT:
+    name: CTWANT
+    module: ctwant
+    enabled: false
+
+  RWNEWS:
+    name: 菱傳媒
+    module: rwnews
+    enabled: false
+
+  CNEWS:
+    name: 匯流新聞網
+    module: cnews
+    enabled: false
+
+  TNL:
+    name: 關鍵評論網
+    module: tnl
+    enabled: false
+
+  REPORTER:
+    name: 報導者
+    module: reporter
+    enabled: false
+
+  PEOPLENEWS:
+    name: 民報
+    module: peoplenews
+    enabled: false
+
+  ERA:
+    name: 年代新聞
+    module: era
+    enabled: false
+
+  NEW7:
+    name: 新新聞
+    module: new7
+    enabled: false
+
+  CW:
+    name: 天下雜誌
+    module: cw
+    enabled: false
+
+  BUSINESSWEEKLY:
+    name: 商業周刊
+    module: businessweekly
+    enabled: false
+
+  COMMERCIALTIMES:
+    name: 工商時報
+    module: commercialtimes
+    enabled: false
+
+  ECONOMIC:
+    name: 經濟日報
+    module: economic
+    enabled: false
+
+  CHINATIMES:
+    name: 中時新聞網
+    module: chinatimes
+    enabled: true
+
+  ETTODAY:
+    name: ETtoday 新聞雲
+    module: ettoday
+    enabled: true
+
+  NOWNEWS:
+    name: NOWnews 今日新聞
+    module: nownews
+    enabled: false
+
+  STORM:
+    name: 風傳媒
+    module: storm
+    enabled: true
+
+  NEWTALK:
+    name: Newtalk 新頭殼
+    module: newtalk
+    enabled: false
+
+  UPMEDIA:
+    name: 上報
+    module: upmedia
+    enabled: false
+
+  MIRROR:
+    name: 鏡週刊
+    module: mirror
+    enabled: false
+
+  TAISOUNDS:
+    name: 太報
+    module: taisounds
+    enabled: false

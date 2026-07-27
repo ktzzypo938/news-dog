@@ -5,23 +5,8 @@
   2. scrape_article 第一筆 URL 能不能正確解析 title / cleanText / publishedAt / imageUrl
 """
 import sys
-import importlib
-import textwrap
 
 import base
-import sources.cna as cna
-import sources.cti as cti
-import sources.ltn as ltn
-import sources.set as set_
-import sources.udn as udn
-
-SOURCES = [
-    ('CNA', '中央通訊社', cna,  True),
-    ('CTI', '中天新聞',   cti,  False),   # ssl_verify=False
-    ('LTN', '自由時報',   ltn,  True),
-    ('SET', '三立新聞',   set_, True),
-    ('UDN', '聯合新聞網', udn,  True),
-]
 
 SEP = '=' * 60
 
@@ -56,12 +41,13 @@ def test_source(code, name, mod, ssl_verify):
         return False
 
     # 顯示前 3 筆 URL
-    for i, u in enumerate(list(set(urls))[:3]):
+    unique_urls = list(dict.fromkeys(urls))
+    for i, u in enumerate(unique_urls[:3]):
         print(f"     [{i+1}] {u}")
 
     # ── 2. 爬取第一筆文章 ──
     print("\n[2] scrape_article（第一筆 URL）")
-    test_url = list(set(urls))[0]
+    test_url = unique_urls[0]
     print(f"  URL: {test_url}")
 
     try:
@@ -75,12 +61,12 @@ def test_source(code, name, mod, ssl_verify):
         # 對 CTI 可能因分類過濾，多試幾筆
         if code == 'CTI':
             print("  → CTI 特殊：嘗試後 5 筆 URL 找符合分類的文章...")
-            for u in list(set(urls))[1:6]:
+            for u in unique_urls[1:6]:
                 print(f"    試: {u}")
                 try:
                     article = mod.scrape_article(session, u)
                     if article:
-                        print(f"    ✅ 第 {list(set(urls)).index(u)+1} 筆成功")
+                        print(f"    ✅ 第 {unique_urls.index(u)+1} 筆成功")
                         break
                 except Exception:
                     pass
@@ -102,7 +88,7 @@ def test_source(code, name, mod, ssl_verify):
 
 if __name__ == '__main__':
     results = {}
-    for args in SOURCES:
+    for args in base.iter_enabled_sources():
         try:
             results[args[0]] = test_source(*args)
         except Exception as e:

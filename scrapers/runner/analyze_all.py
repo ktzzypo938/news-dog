@@ -7,22 +7,8 @@ import sys
 import re
 import time
 from collections import defaultdict
-from datetime import datetime
 
 import base
-import sources.cna as cna
-import sources.cti as cti
-import sources.ltn as ltn
-import sources.set as set_
-import sources.udn as udn
-
-SOURCES = [
-    ('CNA', '中央通訊社', cna,  True),
-    ('CTI', '中天新聞',   cti,  False),
-    ('LTN', '自由時報',   ltn,  True),
-    ('SET', '三立新聞',   set_, True),
-    ('UDN', '聯合新聞網', udn,  True),
-]
 
 SAMPLE_SIZE = 5
 SEP = '─' * 64
@@ -47,7 +33,7 @@ def analyze_source(code, name, mod, ssl_verify):
     # ── 1. 取 URL 列表 ──
     print(f"\n[{code}] 取得 URL 列表...")
     try:
-        urls = list(set(mod.get_list_urls(session)))
+        urls = list(dict.fromkeys(mod.get_list_urls(session)))
     except Exception as e:
         result['issues'].append(f"get_list_urls 失敗: {e}")
         return result
@@ -56,7 +42,7 @@ def analyze_source(code, name, mod, ssl_verify):
 
     # 分析 URL 分類分布
     for u in urls:
-        cat = _extract_url_category(code, u)
+        cat = _extract_url_category(code, u, mod)
         result['url_categories'][cat] += 1
 
     # ── 2. 抽樣 5 篇文章 ──
@@ -98,27 +84,33 @@ def analyze_source(code, name, mod, ssl_verify):
     return result
 
 
-def _extract_url_category(code, url):
+def _extract_url_category(code, url, mod=None):
     """從 URL 推斷文章分類"""
+    if mod and hasattr(mod, 'get_url_category'):
+        return mod.get_url_category(url)
     if code == 'CNA':
         m = re.search(r'/news/([a-z]+)/', url)
-        MAP = {'aipl': '政治', 'asoc': '社會', 'aopl': '國際', 'acn': '兩岸'}
+        MAP = {'aipl': '政治', 'asoc': '社會', 'ahel': '生活', 'aopl': '國際', 'acn': '兩岸'}
         return MAP.get(m.group(1), m.group(1)) if m else '未知'
     if code == 'CTI':
         return 'homepage（無分類）'
     if code == 'LTN':
-        m = re.search(r'breakingnews/([a-z]+)', url)
-        MAP = {'politics': '政治', 'society': '社會', 'world': '國際'}
+        m = re.search(r'/news/([a-z]+)/breakingnews/', url)
+        MAP = {'politics': '政治', 'society': '社會', 'life': '生活', 'world': '國際'}
         return MAP.get(m.group(1), m.group(1)) if m else '未知'
     if code == 'SET':
         m = re.search(r'NewsID=(\d+)', url)
         return 'NewsID' if m else '未知'
     if code == 'UDN':
         m = re.search(r'breaknews/1/(\d+)', url)
-        MAP = {'1': '要聞/政治', '2': '社會', '5': '國際'}
+        MAP = {'1': '要聞/政治', '2': '社會', '9': '生活', '5': '國際'}
         # UDN story URL 無法直接判斷分類，用 story path
         if '/news/story/' in url:
             return 'story（已規範化）'
+        return MAP.get(m.group(1), '未知') if m else '未知'
+    if code == 'CHINATIMES':
+        m = re.search(r'-(260407|260405|260402|260409)', url)
+        MAP = {'260407': '政治', '260405': '生活', '260402': '社會', '260409': '兩岸'}
         return MAP.get(m.group(1), '未知') if m else '未知'
     return '未知'
 
@@ -198,7 +190,7 @@ def print_report(results):
 
 if __name__ == '__main__':
     all_results = []
-    for args in SOURCES:
+    for args in base.iter_enabled_sources():
         try:
             r = analyze_source(*args)
             all_results.append(r)

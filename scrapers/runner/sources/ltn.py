@@ -1,11 +1,9 @@
 """自由時報爬蟲"""
-from datetime import datetime
 from bs4 import BeautifulSoup
-from dateutil import parser
 import base
 
 SOURCE_CODE = 'LTN'
-CATEGORIES = ['politics', 'society', 'world']  # 政治、社會、國際
+CATEGORIES = ['politics', 'society', 'life', 'world']  # 政治、社會、生活、國際
 
 
 def get_list_urls(session):
@@ -55,6 +53,7 @@ def scrape_article(session, url):
         if content_node:
             for tag in content_node.select('script, style, .article_popular, .apps, .author, .disclaim, .further_reading, .adHeight250, .adHeight280'):
                 tag.decompose()
+            base.remove_promo_blocks(content_node)
             paragraphs = content_node.find_all('p')
             if paragraphs:
                 texts = [
@@ -69,8 +68,9 @@ def scrape_article(session, url):
         else:
             clean_text = ""
 
-        time_node = soup.select_one('span.time')
-        published_at = _parse_time(time_node.get_text(strip=True) if time_node else "")
+        published_at = base.extract_published_at(soup, [
+            ('span.time', None),
+        ])
 
         result = {
             "source": SOURCE_CODE, "url": url,
@@ -85,10 +85,3 @@ def scrape_article(session, url):
     except Exception as e:
         print(f"[{SOURCE_CODE}] Error scraping {url}: {e}")
         return None
-
-
-def _parse_time(time_str):
-    try:
-        return parser.parse(time_str).strftime('%Y-%m-%d %H:%M:%S')
-    except Exception:
-        return datetime.now().strftime('%Y-%m-%d %H:%M:%S')
