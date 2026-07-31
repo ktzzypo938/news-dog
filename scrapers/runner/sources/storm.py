@@ -20,12 +20,29 @@ CATEGORY_PAGES = {
 MAX_URLS_PER_CATEGORY = 40
 ARTICLE_RE = re.compile(r'/article/\d+$')
 URL_CATEGORY_MAP = {}
+
+# 投書／專欄／書摘不是新聞報導，標題格式固定，列表階段就排除
+NON_NEWS_TITLE_RES = [
+    re.compile(r'^觀點投書\s*[：:]'),           # 觀點投書：近千億養不出「無人機國家隊」…
+    re.compile(r'^[\w·]{2,6}觀點\s*[：:]'),     # 吳斯懷觀點：美軍彈藥告急…
+    re.compile(r'^[\w·]{2,6}專欄\s*[：:]'),     # 夏珍專欄：時不我予「綠白合」…
+    # 風書房書摘，編號在標題結尾且可能省略：…：《台灣核彈》選摘（7）
+    re.compile(r'選摘\s*(?:[（(]\s*\d+\s*[）)])?\s*$'),
+]
 CATEGORY_LABELS = {
     'politics': '政治',
     'society': '社會',
     'lifestyle': '生活',
     'cross_strait': '兩岸',
 }
+
+
+def is_non_news_title(title):
+    """判斷是否為風傳媒的投書／專欄／書摘等非新聞內容。"""
+    if not title:
+        return False
+    title = title.strip()
+    return any(p.search(title) for p in NON_NEWS_TITLE_RES)
 
 
 def get_list_urls(session):
@@ -37,12 +54,23 @@ def get_list_urls(session):
             resp = session.get(list_url, timeout=20)
             resp.encoding = 'utf-8'
             soup = BeautifulSoup(resp.text, 'lxml')
+            titles = {}
             category_urls = []
             for a in soup.select('a[href]'):
                 full_url = _normalize_url(urljoin(BASE_URL, a.get('href', '')))
-                if ARTICLE_RE.search(full_url) and not full_url.endswith('/110488'):
-                    category_urls.append(full_url)
-            for full_url in list(dict.fromkeys(category_urls))[:MAX_URLS_PER_CATEGORY]:
+                if not ARTICLE_RE.search(full_url) or full_url.endswith('/110488'):
+                    continue
+                category_urls.append(full_url)
+                # 同一篇會有圖片連結與標題連結，取最長的文字當標題
+                text = a.get_text(' ', strip=True)
+                if len(text) > len(titles.get(full_url, '')):
+                    titles[full_url] = text
+
+            news_urls = [u for u in dict.fromkeys(category_urls) if not is_non_news_title(titles.get(u))]
+            skipped = len(set(category_urls)) - len(news_urls)
+            if skipped:
+                print(f"[{SOURCE_CODE}] {category}: skipped {skipped} non-news articles")
+            for full_url in news_urls[:MAX_URLS_PER_CATEGORY]:
                 all_urls.append(full_url)
                 URL_CATEGORY_MAP.setdefault(full_url, category)
         except Exception as e:
@@ -69,6 +97,11 @@ def scrape_article(session, url):
             og_title = soup.select_one('meta[property="og:title"]')
             title = og_title.get('content', '') if og_title else ""
         title = title.split(' | ', 1)[0].strip()
+
+        # 列表頁沒抓到標題文字（純圖片連結）時的最後一道防線
+        if is_non_news_title(title):
+            print(f"[{SOURCE_CODE}] Skipping non-news article: {url}")
+            return None
 
         published_at = base.extract_published_at(soup, [
             ('meta[name="datePublished"]', 'content'),
