@@ -21,7 +21,7 @@ MAX_URLS_PER_CATEGORY = 40
 ARTICLE_RE = re.compile(r'/article/\d+$')
 URL_CATEGORY_MAP = {}
 
-# 投書／專欄／書摘不是新聞報導，標題格式固定，列表階段就排除
+# 投書／專欄／書摘不是新聞報導，標題格式固定，列表階段就排除（省下抓取）
 NON_NEWS_TITLE_RES = [
     re.compile(r'^觀點投書\s*[：:]'),           # 觀點投書：近千億養不出「無人機國家隊」…
     re.compile(r'^[\w·]{2,6}觀點\s*[：:]'),     # 吳斯懷觀點：美軍彈藥告急…
@@ -29,6 +29,12 @@ NON_NEWS_TITLE_RES = [
     # 風書房書摘，編號在標題結尾且可能省略：…：《台灣核彈》選摘（7）
     re.compile(r'選摘\s*(?:[（(]\s*\d+\s*[）)])?\s*$'),
 ]
+
+# 不收錄的 article:section。列表頁看不出這些，只能在文章頁判斷：
+#   VIP  付費牆內容，內文常被截成 200–350 字導讀，拿來做分析／聚合只會污染結果，
+#        而且標題偽裝成一般新聞（專訪》、調查》、歷史新新聞》），標題正則擋不到
+#   評論  涵蓋觀點投書、專欄、專文、評書、風書房書摘等所有意見文章
+EXCLUDED_SECTIONS = {'VIP', '評論'}
 CATEGORY_LABELS = {
     'politics': '政治',
     'society': '社會',
@@ -43,6 +49,13 @@ def is_non_news_title(title):
         return False
     title = title.strip()
     return any(p.search(title) for p in NON_NEWS_TITLE_RES)
+
+
+def _extract_section(soup):
+    """取 article:section（風傳媒用它區分 新聞／評論／VIP）。"""
+    node = (soup.select_one('meta[property="article:section"]')
+            or soup.select_one('meta[name="section"]'))
+    return (node.get('content') or '').strip() if node else ''
 
 
 def get_list_urls(session):
@@ -84,6 +97,13 @@ def scrape_article(session, url):
         resp = session.get(url, timeout=20)
         resp.encoding = 'utf-8'
         soup = BeautifulSoup(resp.text, 'lxml')
+
+        # 頻道判斷擺最前面：VIP／評論不收，省下後面所有解析
+        section = _extract_section(soup)
+        if section in EXCLUDED_SECTIONS:
+            print(f"[{SOURCE_CODE}] Skipping {section} article: {url}")
+            return None
+
         article_ld = _extract_news_article_json_ld(soup)
 
         canonical = _extract_canonical_url(soup) or _normalize_url(url)
