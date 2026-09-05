@@ -4,11 +4,17 @@
 set -euo pipefail
 
 INGEST_API_BASE="${INGEST_API_BASE:-https://square-news-632027619686.asia-east1.run.app/ingest}"
+PROJECT_ID="${PROJECT_ID:-square-news-483901}"
 REGION="${REGION:-asia-east1}"
 
 # API key 不再寫死在 repo；部署前請 export API_KEY=<後端 APP_API_KEY>
 if [ -z "${API_KEY:-}" ]; then
     echo "錯誤：請先設定環境變數 API_KEY（後端 ingest/admin API 的 X-API-KEY）再執行部署。" >&2
+    exit 1
+fi
+if { [ -n "${CTS_FETCH_BASE_URL:-}" ] && [ -z "${CTS_FETCH_TOKEN:-}" ]; } ||
+   { [ -z "${CTS_FETCH_BASE_URL:-}" ] && [ -n "${CTS_FETCH_TOKEN:-}" ]; }; then
+    echo "錯誤：CTS_FETCH_BASE_URL 與 CTS_FETCH_TOKEN 必須同時提供。" >&2
     exit 1
 fi
 
@@ -45,15 +51,20 @@ for SOURCE in "${SOURCES[@]}"; do
     if [ "$SOURCE" = "STORM" ]; then
         MEMORY="1Gi"
     fi
+    ENV_UPDATE="INGEST_API_BASE=${INGEST_API_BASE},API_KEY=${API_KEY},SOURCE_CODE=${SOURCE},SCRAPER_ONLY_TODAY=true,SCRAPER_LOOKBACK_DAYS=1,SCRAPER_TIMEZONE=Asia/Taipei"
+    if [ "$SOURCE" = "CTS" ] && [ -n "${CTS_FETCH_BASE_URL:-}" ]; then
+        ENV_UPDATE+=",CTS_FETCH_BASE_URL=${CTS_FETCH_BASE_URL},CTS_FETCH_TOKEN=${CTS_FETCH_TOKEN}"
+    fi
 
     gcloud functions deploy "scraper-${SOURCE_LOWER}" \
+        --project "$PROJECT_ID" \
         --gen2 \
         --runtime python311 \
         --trigger-http \
         --entry-point run_scraper \
         --no-allow-unauthenticated \
         --region "$REGION" \
-        --update-env-vars "INGEST_API_BASE=${INGEST_API_BASE},API_KEY=${API_KEY},SOURCE_CODE=${SOURCE},SCRAPER_ONLY_TODAY=true,SCRAPER_LOOKBACK_DAYS=1,SCRAPER_TIMEZONE=Asia/Taipei" \
+        --update-env-vars "$ENV_UPDATE" \
         --memory "$MEMORY" \
         --timeout 300s \
         --max-instances 1

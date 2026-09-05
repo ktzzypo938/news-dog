@@ -103,7 +103,7 @@ def scrape_article(session, url):
         section = _extract_section(soup)
         if section in EXCLUDED_SECTIONS:
             print(f"[{SOURCE_CODE}] Skipping {section} article: {url}")
-            return None
+            return base.SkippedArticle(section)
 
         article_ld = _extract_news_article_json_ld(soup)
 
@@ -122,7 +122,7 @@ def scrape_article(session, url):
         # 列表頁沒抓到標題文字（純圖片連結）時的最後一道防線
         if is_non_news_title(title):
             print(f"[{SOURCE_CODE}] Skipping non-news article: {url}")
-            return None
+            return base.SkippedArticle('non-news-title')
 
         published_at = base.extract_published_at(soup, [
             ('meta[name="datePublished"]', 'content'),

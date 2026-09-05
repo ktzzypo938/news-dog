@@ -1,5 +1,6 @@
-"""華視新聞 CTS 爬蟲"""
+"""華視官方新聞 API；GCP 透過專用取頁服務存取，文章網址維持原站。"""
 import re
+import os
 from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup
@@ -8,6 +9,9 @@ import base
 
 SOURCE_CODE = 'CTS'
 BASE_URL = 'https://news.cts.com.tw'
+FETCH_BASE_URL = os.getenv('CTS_FETCH_BASE_URL', BASE_URL).rstrip('/')
+FETCH_TOKEN = os.getenv('CTS_FETCH_TOKEN', '')
+PAGE_SIZE = 30
 
 CATEGORIES = {
     'cross_strait': {
@@ -63,9 +67,9 @@ CROSS_STRAIT_KEYWORDS = (
 
 
 def get_list_urls(session):
-    _ensure_headers(session)
     URL_CATEGORY_MAP.clear()
-
+    session._cts_list_pages = {}
+    session._scraper_list_valid = False
     all_urls = []
     seen = set()
     for category, cfg in CATEGORIES.items():
@@ -73,54 +77,125 @@ def get_list_urls(session):
             urls = _fetch_cross_strait_urls(session, cfg['paths'])
         else:
             urls = _fetch_category_urls(session, category, cfg['path'], cfg['tag'])
-
-        added = 0
         for url in urls:
-            if url in seen:
-                continue
-            all_urls.append(url)
-            seen.add(url)
-            URL_CATEGORY_MAP[url] = category
-            added += 1
-            if added >= MAX_URLS_PER_CATEGORY:
-                break
-
+            if url not in seen:
+                seen.add(url)
+                all_urls.append(url)
+                URL_CATEGORY_MAP[url] = category
     return all_urls
 
 
-def scrape_article(session, url):
-    try:
-        _ensure_headers(session)
-        normalized_url = _normalize_url(url)
-        resp = base.get_page(session, normalized_url, timeout=20, source_code=SOURCE_CODE)
-        if resp is None:
+def _get_api(session, path, allow_missing=False):
+    session._scraper_request_interval = 0.5
+    headers = {'Accept': 'application/json'}
+    if FETCH_BASE_URL != BASE_URL:
+        if not FETCH_TOKEN:
+            raise base.SourceFetchError('CTS_FETCH_TOKEN is required for the configured fetch service')
+        headers['Authorization'] = 'Bearer ' + FETCH_TOKEN
+    url = FETCH_BASE_URL + path
+    resp = base.get_page(session, url, timeout=25, source_code=SOURCE_CODE, headers=headers)
+    if resp is None:
+        if allow_missing and (base.SKIP_URL_CACHE.get(url) in ('http404', 'http410')
+                              or vars(session).get('_scraper_rate_limited')):
             return None
-        soup = BeautifulSoup(resp.text, 'lxml')
+        raise base.SourceFetchError(f'CTS API request failed: {path}')
+    try:
+        payload = resp.json()
+    except ValueError as e:
+        raise base.SourceFetchError(f'CTS API returned non-JSON data: {path}') from e
+    if not isinstance(payload, dict) or payload.get('status') is not True or not isinstance(payload.get('data'), dict):
+        raise base.SourceFetchError(f'CTS API returned an invalid response: {path}')
+    return payload['data']
 
-        canonical = _extract_canonical_url(soup) or normalized_url
-        title = _extract_title(soup)
-        published_at = base.extract_published_at(soup, [
-            ('.news-detail-time', None),
-            ('.article-time', None),
-            ('.date', None),
-        ])
-        image_url = base.extract_image_url(soup)
-        clean_text = _extract_clean_text(soup)
 
-        result = {
-            "source": SOURCE_CODE,
-            "url": canonical,
-            "title": title,
-            "publishedAt": published_at,
-            "rawHtml": "",
-            "cleanText": clean_text,
-        }
-        if image_url:
-            result["imageUrl"] = image_url
-        return result
-    except Exception as e:
-        print(f"[{SOURCE_CODE}] Error scraping {url}: {e}")
+def _iter_list_items(session, path, max_pages):
+    category = path.split('/')[0]
+    cache = vars(session).setdefault('_cts_list_pages', {})
+    for page in range(1, max_pages + 1):
+        key = (category, page)
+        if key not in cache:
+            cache[key] = _get_api(session, f'/api/news/{category}/list?page={page}&limit={PAGE_SIZE}')
+        data = cache[key]
+        items = data.get('articles')
+        if not isinstance(items, list) or any(not isinstance(item, dict) for item in items):
+            raise base.SourceFetchError('CTS API list has no valid articles array')
+        session._scraper_list_valid = True
+        if not items:
+            return
+        dates = [base.parse_datetime(item.get('publishTime')) for item in items]
+        # 列表依時間排序；整頁都比日期範圍舊時即可停止翻頁。
+        if (base.SCRAPER_ONLY_TODAY and all(dates)
+                and max(value[:10] for value in dates) < min(base.get_target_dates())):
+            return
+        for item, published_at in zip(items, dates):
+            if not published_at or base.should_ingest_published_at(published_at):
+                yield item
+        total_pages = data.get('pagination', {}).get('totalPages')
+        if (isinstance(total_pages, int) and page >= total_pages) or len(items) < PAGE_SIZE:
+            return
+
+
+def _article_url(item):
+    url = _normalize_url(urljoin(BASE_URL, item.get('link') or ''))
+    return url if ARTICLE_RE.fullmatch(url) else None
+
+
+def _fetch_category_urls(session, category, path, expected_tag):
+    urls = []
+    for item in _iter_list_items(session, path, MAX_CATEGORY_PAGES):
+        url = _article_url(item)
+        if url and item.get('category') == expected_tag and url not in urls:
+            urls.append(url)
+            if len(urls) >= MAX_URLS_PER_CATEGORY:
+                break
+    return urls
+
+
+def _fetch_cross_strait_urls(session, paths):
+    urls = []
+    for path in paths:
+        for item in _iter_list_items(session, path, MAX_CROSS_STRAIT_PAGES):
+            url = _article_url(item)
+            text = str(item.get('title', '')) + ' ' + str(item.get('content', ''))
+            if url and _looks_cross_strait(text) and url not in urls:
+                urls.append(url)
+                if len(urls) >= MAX_URLS_PER_CATEGORY:
+                    return urls
+    return urls
+
+
+def scrape_article(session, url):
+    canonical = _normalize_url(url)
+    if not ARTICLE_RE.fullmatch(canonical):
         return None
+    article_id = canonical.rsplit('/', 1)[-1].removesuffix('.html')
+    path = '/api/news/' + article_id
+    data = _get_api(session, path, allow_missing=True)
+    if data is None:
+        reason = base.SKIP_URL_CACHE.get(FETCH_BASE_URL + path)
+        if reason in ('http404', 'http410'):
+            base.remember_skip(canonical, reason)
+        return None
+    article = data.get('article')
+    if not isinstance(article, dict):
+        raise base.SourceFetchError(f'CTS API has no article: {article_id}')
+    content = BeautifulSoup(article.get('content') or '', 'lxml')
+    for tag in content.select('img, video, figure'):
+        if tag.parent:
+            tag.decompose()
+    base.remove_promo_blocks(content)
+    result = {
+        'source': SOURCE_CODE,
+        'url': _article_url(article) or canonical,
+        'title': article.get('title', '').strip(),
+        'publishedAt': base.parse_datetime(article.get('publishTime')),
+        'rawHtml': '',
+        'cleanText': content.get_text('\n', strip=True),
+    }
+    image = article.get('coverImage') or {}
+    if isinstance(image, dict) and image.get('imageUrl'):
+        result['imageUrl'] = image['imageUrl']
+    return result
 
 
 def get_url_category(url):
@@ -128,140 +203,9 @@ def get_url_category(url):
     return CATEGORIES.get(category, {}).get('label', '未知')
 
 
-def _fetch_category_urls(session, category, path, expected_tag):
-    urls = []
-    for page in range(1, MAX_CATEGORY_PAGES + 1):
-        list_url = f'{BASE_URL}/{path}?page={page}'
-        try:
-            resp = session.get(list_url, timeout=20)
-            resp.encoding = 'utf-8'
-            soup = BeautifulSoup(resp.text, 'lxml')
-            page_urls = _extract_card_urls(soup, expected_tag=expected_tag)
-            if not page_urls:
-                break
-            urls.extend(page_urls)
-            if len(dict.fromkeys(urls)) >= MAX_URLS_PER_CATEGORY:
-                break
-        except Exception as e:
-            print(f"[{SOURCE_CODE}] Failed to fetch {category} page {page}: {e}")
-            break
-
-    return list(dict.fromkeys(urls))
-
-
-def _fetch_cross_strait_urls(session, paths):
-    urls = []
-    for path in paths:
-        for page in range(1, MAX_CROSS_STRAIT_PAGES + 1):
-            list_url = f'{BASE_URL}/{path}?page={page}'
-            try:
-                resp = session.get(list_url, timeout=20)
-                resp.encoding = 'utf-8'
-                soup = BeautifulSoup(resp.text, 'lxml')
-                page_urls = _extract_card_urls(soup, keyword_filter=True)
-                if not page_urls:
-                    break
-                urls.extend(page_urls)
-                if len(dict.fromkeys(urls)) >= MAX_URLS_PER_CATEGORY:
-                    return list(dict.fromkeys(urls))
-            except Exception as e:
-                print(f"[{SOURCE_CODE}] Failed to fetch cross_strait {path} page {page}: {e}")
-                break
-
-    return list(dict.fromkeys(urls))
-
-
-def _extract_card_urls(soup, expected_tag=None, keyword_filter=False):
-    urls = []
-    for card in soup.select('a.news-list-card[href]'):
-        full_url = _normalize_url(urljoin(BASE_URL, card.get('href', '')))
-        if not ARTICLE_RE.match(full_url):
-            continue
-
-        if expected_tag:
-            tag_node = card.select_one('.news-tag')
-            tag_text = tag_node.get_text(' ', strip=True) if tag_node else ''
-            if expected_tag not in tag_text:
-                continue
-
-        if keyword_filter and not _looks_cross_strait(card.get_text(' ', strip=True)):
-            continue
-
-        urls.append(full_url)
-
-    return list(dict.fromkeys(urls))
-
-
 def _looks_cross_strait(text):
     return any(keyword in text for keyword in CROSS_STRAIT_KEYWORDS)
 
 
-def _ensure_headers(session):
-    session.headers.update({
-        'User-Agent': (
-            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
-            'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
-        ),
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-        'Accept-Language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7',
-    })
-
-
 def _normalize_url(url):
     return url.split('?')[0].split('#')[0].rstrip('/')
-
-
-def _extract_canonical_url(soup):
-    node = soup.select_one('link[rel="canonical"]')
-    if node and node.get('href'):
-        return _normalize_url(urljoin(BASE_URL, node['href']))
-    og_url = soup.select_one('meta[property="og:url"]')
-    if og_url and og_url.get('content'):
-        return _normalize_url(urljoin(BASE_URL, og_url['content']))
-    return None
-
-
-def _extract_title(soup):
-    title_node = soup.select_one('h1.news-detail-title') or soup.select_one('h1')
-    if title_node:
-        return title_node.get_text(' ', strip=True)
-
-    og_title = soup.select_one('meta[property="og:title"]')
-    if og_title and og_title.get('content'):
-        return og_title['content'].split(' - 華視新聞網', 1)[0].strip()
-    return ""
-
-
-def _extract_clean_text(soup):
-    article_node = soup.select_one('.article-content')
-    if not article_node:
-        article_node = soup.select_one('article')
-    if not article_node:
-        return ""
-
-    content = BeautifulSoup(str(article_node), 'lxml')
-    for tag in content.select(
-        'script, style, iframe, img, video, figure, aside, .article-source, '
-        '.social-share, .news-tag, .related-news, .recommend, .advertise'
-    ):
-        tag.decompose()
-    base.remove_promo_blocks(content)
-
-    lines = []
-    for line in content.get_text('\n', strip=True).splitlines():
-        clean = _clean_text(line)
-        if clean:
-            lines.append(clean)
-
-    return "\n".join(lines)
-
-
-def _clean_text(text):
-    if not text:
-        return ""
-    text = re.sub(r'\s+', ' ', text).strip()
-    if not text:
-        return ""
-    if text.startswith(('點我下載華視新聞APP', '按讚加入華視新聞粉絲團', '【更多新聞】', '責任編輯：')):
-        return ""
-    return text

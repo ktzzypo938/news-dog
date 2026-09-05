@@ -5,9 +5,12 @@ import os
 import json
 import re
 import importlib
+import time
 import requests
 import yaml
-from datetime import datetime, timedelta
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from dateutil import parser
@@ -29,6 +32,24 @@ except ValueError:
 SKIP_URL_CACHE = {}
 SKIP_URL_CACHE_MAX = 5000
 
+
+@dataclass(frozen=True)
+class SkippedArticle:
+    """來源刻意排除的文章；舊版單篇測試仍可用 if not article 判斷。"""
+    reason: str
+
+    def __bool__(self):
+        return False
+
+
+class IngestAPIError(RuntimeError):
+    pass
+
+
+class SourceFetchError(RuntimeError):
+    pass
+
+
 COMMON_TIME_SELECTORS = [
     ('meta[property="article:published_time"]', 'content'),
     ('meta[name="pubdate"]', 'content'),
@@ -43,7 +64,9 @@ def create_session(ssl_verify=True):
     retry_strategy = Retry(
         total=3,
         backoff_factor=1,
-        status_forcelist=[429, 500, 502, 503, 504],
+        status_forcelist=[500, 502, 503, 504],
+        # 429 交給 runner 延後整批，避免每篇各重試 4 次。
+        respect_retry_after_header=False,
         allowed_methods=["GET", "POST"],
         raise_on_status=False
     )
@@ -80,9 +103,10 @@ def iter_enabled_sources():
 
 def get_new_urls(session, source_code, urls):
     """呼叫後端 API 檢查哪些 URL 尚未爬取（API 呼叫固定啟用 SSL 驗證）"""
-    if not API_KEY:
-        print(f"[{source_code}] ERROR: API_KEY 未設定，無法呼叫 ingest API")
+    if not urls:
         return []
+    if not API_KEY:
+        raise IngestAPIError('API_KEY 未設定，無法呼叫 ingest API')
     try:
         resp = session.post(
             f"{INGEST_API_BASE}/check-urls",
@@ -91,11 +115,14 @@ def get_new_urls(session, source_code, urls):
             timeout=15,
             verify=True,
         )
-        if resp.status_code == 200:
-            return resp.json()
-    except Exception as e:
-        print(f"Error checking URLs: {e}")
-    return []
+        if resp.status_code != 200:
+            raise IngestAPIError(f'check-urls returned HTTP {resp.status_code}')
+        result = resp.json()
+        if not isinstance(result, list) or any(not isinstance(url, str) for url in result):
+            raise IngestAPIError('check-urls returned an invalid URL list')
+        return result
+    except (requests.RequestException, ValueError) as e:
+        raise IngestAPIError(f'check-urls request failed: {type(e).__name__}') from e
 
 
 def ingest_article(session, data):
@@ -176,20 +203,44 @@ def remember_skip(url, reason):
     SKIP_URL_CACHE[url] = reason
 
 
-def get_page(session, url, timeout=20, source_code='-'):
-    """抓文章頁。4xx/5xx 一律視為失敗回 None，不再把錯誤頁當文章解析；404/410 記入 skip cache。"""
+def get_page(session, url, timeout=20, source_code='-', headers=None):
+    """抓列表或文章；失效網址快取，429 停止本輪，來源可設定最小請求間隔。"""
+    state = vars(session)
+    if state.get('_scraper_rate_limited', False):
+        return None
+    interval = state.get('_scraper_request_interval', 0)
+    delay = interval - (time.monotonic() - state.get('_scraper_last_request', 0))
+    if delay > 0:
+        time.sleep(delay)
+    session._scraper_last_request = time.monotonic()
     try:
-        resp = session.get(url, timeout=timeout)
+        resp = session.get(url, timeout=timeout, headers=headers or {})
     except requests.exceptions.ContentDecodingError:
         # 中天的 410 頁宣稱 gzip 但內容不是，requests 會直接丟例外；改用 identity 重抓拿真正的狀態碼
-        resp = session.get(url, timeout=timeout, headers={'Accept-Encoding': 'identity'})
+        resp = session.get(url, timeout=timeout, headers={**(headers or {}), 'Accept-Encoding': 'identity'})
     if resp.status_code >= 400:
         print(f"[{source_code}] HTTP {resp.status_code} for {url}")
         if resp.status_code in (404, 410):
             remember_skip(url, f'http{resp.status_code}')
+        elif resp.status_code == 429:
+            session._scraper_rate_limited = True
+            session._scraper_retry_after_seconds = _retry_after_seconds(resp.headers.get('Retry-After'))
         return None
     resp.encoding = 'utf-8'
     return resp
+
+
+def _retry_after_seconds(value):
+    try:
+        return max(1, int(value))
+    except (TypeError, ValueError):
+        try:
+            target = parsedate_to_datetime(value)
+            if target.tzinfo is None:
+                target = target.replace(tzinfo=timezone.utc)
+            return max(1, int((target - datetime.now(timezone.utc)).total_seconds()))
+        except (TypeError, ValueError, OverflowError):
+            return 60
 
 
 def extract_published_at(soup, selectors=None):
@@ -425,21 +476,24 @@ def run_source(session, source_code, source_module):
     1. 取得文章 URL 列表
     2. 過濾已爬取的 URL
     3. 爬取並送入後端
-    返回統計 dict：listed / new / skipped_cached / ingested / skipped_date / failed
+    區分正常排除、失效網址、限流延後與真正的解析／匯入失敗。
     """
     stats = {'listed': 0, 'new': 0, 'skipped_cached': 0, 'ingested': 0,
-             'skipped_date': 0, 'failed': 0}
+             'skipped_date': 0, 'skipped_filtered': 0, 'skipped_unavailable': 0,
+             'deferred': 0, 'retry_after_seconds': 0, 'failed': 0}
     all_urls = source_module.get_list_urls(session)
 
     if not all_urls:
-        print(f"[{source_code}] ERROR: No URLs found")
+        stats['list_ok'] = vars(session).get('_scraper_list_valid', False)
+        stats['retry_after_seconds'] = vars(session).get('_scraper_retry_after_seconds', 0)
+        print(f"[{source_code}] {'No eligible URLs' if stats['list_ok'] else 'ERROR: No URLs found'}")
         return stats
 
     unique_urls = list(dict.fromkeys(all_urls))
     stats['listed'] = len(unique_urls)
-    new_urls = get_new_urls(session, source_code, unique_urls)
-    cached = [u for u in new_urls if u in SKIP_URL_CACHE]
-    new_urls = [u for u in new_urls if u not in SKIP_URL_CACHE]
+    cached = [u for u in unique_urls if u in SKIP_URL_CACHE]
+    candidates = [u for u in unique_urls if u not in SKIP_URL_CACHE]
+    new_urls = get_new_urls(session, source_code, candidates)
     stats['new'] = len(new_urls)
     stats['skipped_cached'] = len(cached)
     print(f"[{source_code}] Found {len(new_urls)} new URLs out of {len(unique_urls)}"
@@ -448,20 +502,37 @@ def run_source(session, source_code, source_module):
     target_dates = get_target_dates() if SCRAPER_ONLY_TODAY else None
     success_count = 0
     skipped_outside_date = 0
-    for url in new_urls:
+    for index, url in enumerate(new_urls):
+        if vars(session).get('_scraper_rate_limited', False):
+            stats['deferred'] = len(new_urls) - index
+            break
         article_data = source_module.scrape_article(session, url)
+        if isinstance(article_data, SkippedArticle):
+            stats['skipped_filtered'] += 1
+            remember_skip(url, 'filtered:' + article_data.reason)
+            continue
         if not article_data:
+            if vars(session).get('_scraper_rate_limited', False):
+                stats['deferred'] = len(new_urls) - index
+                break
+            if SKIP_URL_CACHE.get(url) in ('http404', 'http410'):
+                stats['skipped_unavailable'] += 1
+            else:
+                stats['failed'] += 1
             continue
         # 中央雜訊過濾：不論來源自身清理邏輯，統一再過濾一次推薦/廣告內容
         article_data['cleanText'] = sanitize_clean_text(article_data.get('cleanText'))
         if not article_data.get('title'):
             print(f"[{source_code}] Skipping {url}: Missing title")
+            stats['failed'] += 1
             continue
         if not article_data.get('cleanText'):
             print(f"[{source_code}] Skipping {url}: Missing cleanText")
+            stats['failed'] += 1
             continue
         if not article_data.get('publishedAt'):
             print(f"[{source_code}] Skipping {url}: Missing publishedAt")
+            stats['failed'] += 1
             continue
         if not should_ingest_published_at(article_data.get('publishedAt'), target_dates):
             skipped_outside_date += 1
@@ -471,13 +542,16 @@ def run_source(session, source_code, source_module):
             success_count += 1
         else:
             print(f"[{source_code}] Failed to ingest: {url}")
+            stats['failed'] += 1
 
     if skipped_outside_date:
         print(f"[{source_code}] Skipped {skipped_outside_date} URLs outside target dates {sorted(target_dates)}")
 
     stats['ingested'] = success_count
     stats['skipped_date'] = skipped_outside_date
-    stats['failed'] = max(0, stats['new'] - success_count - skipped_outside_date)
+    stats['retry_after_seconds'] = vars(session).get('_scraper_retry_after_seconds', 0)
     print(f"[{source_code}] SUMMARY listed={stats['listed']} new={stats['new']} ingested={stats['ingested']} "
-          f"skipped_date={stats['skipped_date']} skipped_cached={stats['skipped_cached']} failed={stats['failed']}")
+          f"skipped_date={stats['skipped_date']} skipped_cached={stats['skipped_cached']} "
+          f"skipped_filtered={stats['skipped_filtered']} skipped_unavailable={stats['skipped_unavailable']} "
+          f"deferred={stats['deferred']} retry_after_seconds={stats['retry_after_seconds']} failed={stats['failed']}")
     return stats

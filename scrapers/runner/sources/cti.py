@@ -1,10 +1,12 @@
 """中天新聞爬蟲（需要 ssl_verify=false）"""
 import re
+import json
 from bs4 import BeautifulSoup
 import base
 
 SOURCE_CODE = 'CTI'
 ALLOWED_CATS = ['政治', '社會', '生活', '國際', '要聞', '全球']
+REQUEST_INTERVAL_SECONDS = 1.0
 
 # CTI 分類 topic 頁（要聞、社會、國際）
 TOPIC_PAGES = [
@@ -16,33 +18,80 @@ TOPIC_PAGES = [
 
 
 def get_list_urls(session):
-    all_paths = set()
+    session._scraper_request_interval = REQUEST_INTERVAL_SECONDS
+    all_urls = []
+    valid_pages = 0
     for path in TOPIC_PAGES:
         url = f'https://ctinews.com{path}'
         try:
-            resp = session.get(url, timeout=15)
-            paths = re.findall(r'/news/items/[a-zA-Z0-9]+', resp.text)
-            all_paths.update(paths)
+            resp = base.get_page(session, url, timeout=15, source_code=SOURCE_CODE)
+            if resp is None:
+                if vars(session).get('_scraper_rate_limited'):
+                    break
+                continue
+            urls = _extract_list_urls(BeautifulSoup(resp.text, 'lxml'))
+            if urls is not None:
+                valid_pages += 1
+                all_urls.extend(urls)
         except Exception as e:
             print(f"[{SOURCE_CODE}] Failed to fetch {path}: {e}")
 
-    # 備用：若 topic 頁失效，從首頁補充
-    if len(all_paths) < 10:
-        print(f"[{SOURCE_CODE}] Topic pages returned {len(all_paths)} URLs, falling back to homepage...")
+    # 只有頁面結構失效才用首頁；近期文章少或全是舊文，不代表列表壞掉。
+    if not valid_pages and not vars(session).get('_scraper_rate_limited'):
+        print(f"[{SOURCE_CODE}] Topic page data unavailable, trying homepage...")
         try:
-            resp = session.get('https://ctinews.com/', timeout=15)
-            all_paths.update(re.findall(r'/news/items/[a-zA-Z0-9]+', resp.text))
+            resp = base.get_page(session, 'https://ctinews.com/', timeout=15, source_code=SOURCE_CODE)
+            if resp is not None:
+                urls = _extract_list_urls(BeautifulSoup(resp.text, 'lxml'))
+                if urls is not None:
+                    valid_pages += 1
+                    all_urls.extend(urls)
         except Exception as e:
             print(f"[{SOURCE_CODE}] Fallback failed: {e}")
 
-    return [
-        ("https://ctinews.com" + p).split('?')[0].split('#')[0].rstrip('/')
-        for p in all_paths
-    ]
+    session._scraper_list_valid = bool(valid_pages)
+    return list(dict.fromkeys(all_urls))
+
+
+def _extract_list_urls(soup):
+    """Nuxt 的 news_id 才是文章 ID；JSON-LD 的版位 id 會組出大量 410 網址。"""
+    node = soup.find('script', id='__NUXT_DATA__')
+    try:
+        data = json.loads(node.string or node.get_text()) if node else None
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(data, list):
+        return None
+
+    def scalar(ref):
+        if isinstance(ref, int) and not isinstance(ref, bool) and 0 <= ref < len(data):
+            value = data[ref]
+            return value if isinstance(value, str) else None
+        return None
+
+    articles = {}
+    recognized = False
+    target_dates = base.get_target_dates()
+    for item in data:
+        if not isinstance(item, dict) or 'news_id' not in item or 'release_at' not in item:
+            continue
+        recognized = True
+        article_id = scalar(item['news_id'])
+        published_at = base.parse_datetime(scalar(item['release_at']))
+        if not article_id or not re.fullmatch(r'[A-Za-z0-9]+', article_id) or not published_at:
+            continue
+        if not base.should_ingest_published_at(published_at, target_dates):
+            continue
+        articles[article_id] = max(articles.get(article_id, ''), published_at)
+    if not recognized:
+        return None
+    return [f'https://ctinews.com/news/items/{article_id}'
+            for article_id in sorted(articles, key=lambda key: articles[key], reverse=True)]
 
 
 def scrape_article(session, url):
     try:
+        session._scraper_request_interval = REQUEST_INTERVAL_SECONDS
         resp = base.get_page(session, url, timeout=20, source_code=SOURCE_CODE)
         if resp is None:
             return None
@@ -69,7 +118,7 @@ def scrape_article(session, url):
         cat_name = cat_node.get_text(strip=True) if cat_node else ""
         if cat_name and not any(c in cat_name for c in ALLOWED_CATS):
             print(f"[{SOURCE_CODE}] Skipping {url} due to category: {cat_name}")
-            return None
+            return base.SkippedArticle('category:' + cat_name)
 
         title_node = soup.select_one('h1.article-title') or soup.select_one('h1')
         title = title_node.get_text(strip=True) if title_node else ""

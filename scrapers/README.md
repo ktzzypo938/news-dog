@@ -115,16 +115,30 @@ python3 scrapers/runner/analyze_all.py
 - `INGEST_API_BASE`: 後端 ingest API 基礎路徑
 - `API_KEY`: ingest API key。**不再有預設值**，部署前必須 `export API_KEY=...`（與後端 `APP_API_KEY` 相同）
 - `SCRAPER_LOOKBACK_DAYS`: 允許送入「今天往前幾天」的文章，預設 1（今天＋昨天），用來補回跨日前沒抓到的稿
+- `REGION`: Cloud Functions 區域
+- `PROJECT_ID`: 預設為 `square-news-483901`，部署不依賴本機目前選取的 GCP 專案。
+- `CTS_FETCH_BASE_URL`、`CTS_FETCH_TOKEN`: 華視專用取頁服務的網址與金鑰；首次設定或更換時同時提供。未提供時部署腳本保留線上既有設定。
 
 ### 執行結果判讀
 
 Cloud Function 的回應碼會反映來源健康狀態，方便 Cloud Scheduler / 監控發現壞掉的來源：
 
-- `200`：正常，或本輪沒有新文章（訊息開頭若是 `WARNING:` 代表部分文章解析失敗）
-- `500`：列表頁抓不到任何 URL，或有新 URL 但一篇都沒成功送入（selector 失效、被擋、ingest API 壞掉）
+- `200`：正常、沒有近期新文章，或全部文章按規則排除。`WARNING:` 表示部分文章失敗或因限流延後。
+- `500`：列表結構失效，或至少 2 篇真正解析／匯入失敗且沒有成功文章。
+- `503`：來源 API 或後端 API 無法使用，或尚未取得列表即被限流；不會把 API 驗證失敗誤報為「沒有新文章」。
 
-每輪結束會印一行 `[CODE] SUMMARY listed=.. new=.. ingested=.. skipped_date=.. skipped_cached=.. failed=..`，可直接做 log-based metric。
-- `REGION`: Cloud Functions 區域
+每輪日誌包含 `listed`、`new`、`ingested`、`skipped_date`、`skipped_cached`、`skipped_filtered`、`skipped_unavailable`、`deferred`、`retry_after_seconds`、`failed`。VIP／評論是 `skipped_filtered`；404／410 是 `skipped_unavailable`；429 會停止本輪後續請求，尚未處理的文章列為 `deferred`，由後續排程重新檢查。
+
+中天使用頁面 Nuxt 資料中的 `news_id` 與 `release_at` 選取近期文章，不使用含錯誤版位網址的 JSON-LD。請求間隔至少 1 秒，HTTP adapter 不會在收到 429 後逐篇自動重試。
+
+華視在 GCP 直接請求會收到來源 CloudFront 403。正式環境改由 `../edge/cts-fetch/` 的專用 Cloudflare Worker 存取華視官方 JSON API，再由原有 runner 分類、檢查重複及匯入。資料中的文章網址維持 `news.cts.com.tw`。Worker 僅接受已授權的華視分類列表與文章 API，不提供任意網址轉送。
+
+離線回歸測試：
+
+```bash
+python3 -m unittest discover -s scrapers/runner/tests -v
+node --test edge/cts-fetch/test.mjs
+```
 
 部署所有來源：
 

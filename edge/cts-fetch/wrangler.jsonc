@@ -1,0 +1,8 @@
+{
+  "name": "news-dog-cts-fetch",
+  "account_id": "a5035c42fe7775c8d40ca4840ffd87b4",
+  "main": "src/index.mjs",
+  "compatibility_date": "2026-09-05",
+  "workers_dev": true,
+  "observability": { "enabled": true }
+}
