@@ -21,6 +21,7 @@ import urllib3
 import functions_framework
 
 import base
+from telemetry import RunTelemetry
 
 
 def load_config():
@@ -75,20 +76,37 @@ def run_scraper(request):
 
     session = base.create_session(ssl_verify=ssl_verify)
 
+    stats = base.empty_run_stats()
+    telemetry = RunTelemetry(source_code, request, stats)
+    session._crawler_telemetry = telemetry
+    telemetry.emit('run_started')
     module_name = source_cfg['module']
     try:
         source_module = importlib.import_module(f'sources.{module_name}')
     except ImportError as e:
+        telemetry.error('MODULE_IMPORT_ERROR')
+        telemetry.finish(500, exception=True)
+        session.close()
         return f"Cannot load module 'sources.{module_name}': {e}", 500
 
     print(f"Starting {source_code} ({source_cfg['name']}) scraper...")
     try:
-        stats = base.run_source(session, source_code, source_module)
+        base.run_source(session, source_code, source_module, stats)
     except (base.IngestAPIError, base.SourceFetchError) as e:
+        telemetry.error(type(e).__name__)
+        telemetry.finish(503, exception=True)
         print(f"[{source_code}] ERROR: {e}")
         return f"ERROR: {e} from {source_code}", 503
+    except Exception as e:
+        telemetry.error(type(e).__name__)
+        telemetry.finish(500, exception=True)
+        print(f"[{source_code}] ERROR: {type(e).__name__}")
+        return f"ERROR: {type(e).__name__} from {source_code}", 500
+    finally:
+        session.close()
 
     status, message = evaluate_run(stats)
+    telemetry.finish(status)
     print(f"[{source_code}] {message}")
     if status == 503 and stats.get('retry_after_seconds'):
         return f"{message} from {source_code}", status, {'Retry-After': str(stats['retry_after_seconds'])}

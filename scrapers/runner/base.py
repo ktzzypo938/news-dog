@@ -8,6 +8,7 @@ import importlib
 import time
 import requests
 import yaml
+import telemetry
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
@@ -106,6 +107,7 @@ def get_new_urls(session, source_code, urls):
     if not urls:
         return []
     if not API_KEY:
+        telemetry.record_error(session, 'MISSING_API_KEY', stage='CHECK_URLS')
         raise IngestAPIError('API_KEY 未設定，無法呼叫 ingest API')
     try:
         resp = session.post(
@@ -116,12 +118,14 @@ def get_new_urls(session, source_code, urls):
             verify=True,
         )
         if resp.status_code != 200:
+            telemetry.record_error(session, f'HTTP_{resp.status_code}', stage='CHECK_URLS')
             raise IngestAPIError(f'check-urls returned HTTP {resp.status_code}')
         result = resp.json()
         if not isinstance(result, list) or any(not isinstance(url, str) for url in result):
             raise IngestAPIError('check-urls returned an invalid URL list')
         return result
     except (requests.RequestException, ValueError) as e:
+        telemetry.record_error(session, type(e).__name__, stage='CHECK_URLS')
         raise IngestAPIError(f'check-urls request failed: {type(e).__name__}') from e
 
 
@@ -135,8 +139,11 @@ def ingest_article(session, data):
             timeout=15,
             verify=True,
         )
+        if resp.status_code != 202:
+            telemetry.record_error(session, f'HTTP_{resp.status_code}', data.get('url'), 'INGEST')
         return resp.status_code == 202
     except Exception as e:
+        telemetry.record_error(session, type(e).__name__, data.get('url'), 'INGEST')
         print(f"Error ingesting article: {e}")
         return False
 
@@ -219,6 +226,13 @@ def get_page(session, url, timeout=20, source_code='-', headers=None):
         # 中天的 410 頁宣稱 gzip 但內容不是，requests 會直接丟例外；改用 identity 重抓拿真正的狀態碼
         resp = session.get(url, timeout=timeout, headers={**(headers or {}), 'Accept-Encoding': 'identity'})
     if resp.status_code >= 400:
+        upstream_status = None
+        if url.startswith(os.getenv('CTS_FETCH_BASE_URL', 'https://invalid.invalid') + '/'):
+            try:
+                upstream_status = resp.json().get('upstreamStatus')
+            except (ValueError, AttributeError):
+                pass
+        telemetry.record_error(session, f'HTTP_{resp.status_code}', url, upstream_status=upstream_status)
         print(f"[{source_code}] HTTP {resp.status_code} for {url}")
         if resp.status_code in (404, 410):
             remember_skip(url, f'http{resp.status_code}')
@@ -470,7 +484,13 @@ def extract_image_url(soup):
     return None
 
 
-def run_source(session, source_code, source_module):
+def empty_run_stats():
+    return {'listed': 0, 'new': 0, 'skipped_cached': 0, 'ingested': 0,
+            'skipped_date': 0, 'skipped_filtered': 0, 'skipped_unavailable': 0,
+            'deferred': 0, 'retry_after_seconds': 0, 'failed': 0}
+
+
+def run_source(session, source_code, source_module, stats=None):
     """
     執行單一來源的完整爬取流程：
     1. 取得文章 URL 列表
@@ -478,14 +498,16 @@ def run_source(session, source_code, source_module):
     3. 爬取並送入後端
     區分正常排除、失效網址、限流延後與真正的解析／匯入失敗。
     """
-    stats = {'listed': 0, 'new': 0, 'skipped_cached': 0, 'ingested': 0,
-             'skipped_date': 0, 'skipped_filtered': 0, 'skipped_unavailable': 0,
-             'deferred': 0, 'retry_after_seconds': 0, 'failed': 0}
+    if stats is None:
+        stats = empty_run_stats()
+    telemetry.set_stage(session, 'LIST_FETCH')
     all_urls = source_module.get_list_urls(session)
 
     if not all_urls:
         stats['list_ok'] = vars(session).get('_scraper_list_valid', False)
         stats['retry_after_seconds'] = vars(session).get('_scraper_retry_after_seconds', 0)
+        if not stats['list_ok']:
+            telemetry.record_error(session, 'NO_LIST_URLS', stage='LIST_FETCH')
         print(f"[{source_code}] {'No eligible URLs' if stats['list_ok'] else 'ERROR: No URLs found'}")
         return stats
 
@@ -493,6 +515,7 @@ def run_source(session, source_code, source_module):
     stats['listed'] = len(unique_urls)
     cached = [u for u in unique_urls if u in SKIP_URL_CACHE]
     candidates = [u for u in unique_urls if u not in SKIP_URL_CACHE]
+    telemetry.set_stage(session, 'CHECK_URLS')
     new_urls = get_new_urls(session, source_code, candidates)
     stats['new'] = len(new_urls)
     stats['skipped_cached'] = len(cached)
@@ -500,12 +523,11 @@ def run_source(session, source_code, source_module):
           + (f" ({len(cached)} skipped by cache)" if cached else ""))
 
     target_dates = get_target_dates() if SCRAPER_ONLY_TODAY else None
-    success_count = 0
-    skipped_outside_date = 0
     for index, url in enumerate(new_urls):
         if vars(session).get('_scraper_rate_limited', False):
             stats['deferred'] = len(new_urls) - index
             break
+        telemetry.set_stage(session, 'ARTICLE_FETCH')
         article_data = source_module.scrape_article(session, url)
         if isinstance(article_data, SkippedArticle):
             stats['skipped_filtered'] += 1
@@ -519,36 +541,39 @@ def run_source(session, source_code, source_module):
                 stats['skipped_unavailable'] += 1
             else:
                 stats['failed'] += 1
+                telemetry.record_error(session, 'NO_ARTICLE', url, 'PARSE')
             continue
         # 中央雜訊過濾：不論來源自身清理邏輯，統一再過濾一次推薦/廣告內容
         article_data['cleanText'] = sanitize_clean_text(article_data.get('cleanText'))
         if not article_data.get('title'):
             print(f"[{source_code}] Skipping {url}: Missing title")
             stats['failed'] += 1
+            telemetry.record_error(session, 'MISSING_TITLE', url, 'PARSE')
             continue
         if not article_data.get('cleanText'):
             print(f"[{source_code}] Skipping {url}: Missing cleanText")
             stats['failed'] += 1
+            telemetry.record_error(session, 'MISSING_CONTENT', url, 'PARSE')
             continue
         if not article_data.get('publishedAt'):
             print(f"[{source_code}] Skipping {url}: Missing publishedAt")
             stats['failed'] += 1
+            telemetry.record_error(session, 'MISSING_DATE', url, 'PARSE')
             continue
         if not should_ingest_published_at(article_data.get('publishedAt'), target_dates):
-            skipped_outside_date += 1
+            stats['skipped_date'] += 1
             remember_skip(url, 'outside-date')
             continue
+        telemetry.set_stage(session, 'INGEST')
         if ingest_article(session, article_data):
-            success_count += 1
+            stats['ingested'] += 1
         else:
             print(f"[{source_code}] Failed to ingest: {url}")
             stats['failed'] += 1
 
-    if skipped_outside_date:
-        print(f"[{source_code}] Skipped {skipped_outside_date} URLs outside target dates {sorted(target_dates)}")
+    if stats['skipped_date']:
+        print(f"[{source_code}] Skipped {stats['skipped_date']} URLs outside target dates {sorted(target_dates)}")
 
-    stats['ingested'] = success_count
-    stats['skipped_date'] = skipped_outside_date
     stats['retry_after_seconds'] = vars(session).get('_scraper_retry_after_seconds', 0)
     print(f"[{source_code}] SUMMARY listed={stats['listed']} new={stats['new']} ingested={stats['ingested']} "
           f"skipped_date={stats['skipped_date']} skipped_cached={stats['skipped_cached']} "

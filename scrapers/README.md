@@ -1,5 +1,17 @@
 # 新聞爬蟲部署指南
 
+## 後台執行監控
+
+共用 runner 會輸出 `telemetry=crawler_run` 的單行 JSON：開始、超過約 60 秒的進度與結束事件。
+每次 HTTP 嘗試有獨立 `run_id`；Scheduler 的 job name／scheduled time 用來辨認排程時段與重試。
+事件保留 revision、即時計數、錯誤階段與最多 5 個已移除 query／認證資訊的 URL 範例，不額外呼叫監控 API。
+`accepted` 表示後端 HTTP 202，與文章資料庫實際新增篇數分開統計。
+
+`newprism` 的監控收集器從 Cloud Logging 增量保存紀錄；後台入口 `/admin/crawlers`。
+程式硬逾時或被終止可能無法輸出結束事件，此時由平台請求日誌／逾時未完成狀態補足。
+
+離線驗證：`PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scrapers/runner/tests -v`。
+
 本專案目前啟用同事版 14 個新聞來源：
 
 - `TVBS`: TVBS
