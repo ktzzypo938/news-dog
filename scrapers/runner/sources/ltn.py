@@ -1,5 +1,6 @@
 """自由時報爬蟲"""
 from bs4 import BeautifulSoup
+from urllib.parse import urlsplit
 import base
 
 SOURCE_CODE = 'LTN'
@@ -51,7 +52,16 @@ def scrape_article(session, url):
         # 注意：不能用 .boxTitle 當 remove selector，因為 div.text.boxTitle.boxText 就是正文 div
         body = soup.select_one('[itemprop="articleBody"]')
         content_node = (body.select_one('div.text') if body else None) or soup.select_one('div.text')
+        editorial_video = False
         if content_node:
+            # Capture editorial embeds before cleanup removes empty wrapper paragraphs.
+            for frame in content_node.select('iframe[src]'):
+                video = urlsplit(frame.get('src', ''))
+                if video.scheme in {'', 'http', 'https'} \
+                        and video.hostname in {'www.youtube.com', 'youtube.com', 'www.youtube-nocookie.com', 'youtube-nocookie.com'} \
+                        and video.path.startswith('/embed/') and video.path.removeprefix('/embed/'):
+                    editorial_video = True
+                    break
             for tag in content_node.select('script, style, .article_popular, .apps, .author, .disclaim, .further_reading, .adHeight250, .adHeight280'):
                 tag.decompose()
             base.remove_promo_blocks(content_node)
@@ -68,6 +78,11 @@ def scrape_article(session, url):
                 clean_text = content_node.get_text("\n", strip=True)
         else:
             clean_text = ""
+
+        # Some LTN entries intentionally contain only an editorial YouTube video.
+        # Keep empty ordinary articles as failures; unrelated/ad iframes do not qualify.
+        if title and not clean_text and editorial_video:
+            return base.SkippedArticle('video-only')
 
         published_at = base.extract_published_at(soup, [
             ('span.time', None),
