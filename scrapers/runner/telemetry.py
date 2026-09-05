@@ -36,7 +36,9 @@ class RunTelemetry:
         self.stage = 'RUNTIME'
         headers = request.headers
         job = headers.get('X-CloudScheduler-JobName', '')
-        self.job_name = job[:300] if re.fullmatch(r'projects/[\w-]+/locations/[\w-]+/jobs/[\w-]+', job) else None
+        # Scheduler HTTP targets can send the short job ID instead of a resource path.
+        valid_job = job == 'job-scraper-' + source.lower() or re.fullmatch(r'projects/[\w-]+/locations/[\w-]+/jobs/[\w-]+', job)
+        self.job_name = job[:300] if valid_job else None
         self.scheduled_at = None
         try:
             value = datetime.fromisoformat(headers.get('X-CloudScheduler-ScheduleTime', '').replace('Z', '+00:00'))

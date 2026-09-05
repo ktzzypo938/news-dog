@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
+from werkzeug.datastructures import Headers
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import base
@@ -54,6 +55,23 @@ class TelemetryTests(unittest.TestCase):
         first, retry = RunTelemetry('CTS', request, base.empty_run_stats()), RunTelemetry('CTS', request, base.empty_run_stats())
         self.assertNotEqual(first.run_id, retry.run_id)
         self.assertEqual(first.scheduled_at, retry.scheduled_at)
+
+    def test_actual_scheduler_short_job_and_offset_timestamp_are_preserved(self):
+        request = SimpleNamespace(headers=Headers({
+            'X-Cloudscheduler-Jobname': 'job-scraper-cts',
+            'X-Cloudscheduler-Scheduletime': '2026-09-04T22:42:01.90066-07:00'}))
+        run = RunTelemetry('CTS', request, base.empty_run_stats())
+        self.assertEqual(run.job_name, 'job-scraper-cts')
+        self.assertEqual(run.scheduled_at, '2026-09-05T05:42:01.900660+00:00')
+        with contextlib.redirect_stdout(io.StringIO()) as output: run.emit('run_started')
+        self.assertEqual(json.loads(output.getvalue())['trigger_type'], 'SCHEDULED')
+
+    def test_short_job_for_a_different_source_is_not_trusted(self):
+        request = SimpleNamespace(headers={'X-CloudScheduler-JobName': 'job-scraper-tvbs',
+                                           'X-CloudScheduler-ScheduleTime': '2026-09-05T05:03:00Z'})
+        run = RunTelemetry('CTS', request, base.empty_run_stats())
+        self.assertIsNone(run.job_name)
+        self.assertIsNone(run.scheduled_at)
 
     def test_error_samples_are_bounded_and_urls_have_no_credentials(self):
         run = RunTelemetry('CTS', SimpleNamespace(headers={}), base.empty_run_stats())
