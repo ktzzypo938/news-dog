@@ -31,7 +31,7 @@
 
 各來源目前以「兩岸、政治、社會、生活」為主要抓取範圍；部分來源沒有獨立兩岸分類時，會從國際或要聞分類搭配關鍵字補抓。
 
-其他舊來源檔案保留在 `sources/` 目錄，但 `sources.yml` 已設為 disabled，部署腳本不再納入；排程腳本會先刪除舊來源 scheduler。
+其他舊來源檔案保留在 `sources/` 目錄，但 `sources.yml` 已設為 disabled，部署腳本不再納入。排程腳本只設定上述 14 個來源。
 
 ## 主要架構
 
@@ -205,4 +205,26 @@ cd scrapers
 ./setup_scheduler.sh
 ```
 
-目前排程腳本預設每 15 分鐘觸發一次各來源 Cloud Function，並使用 OIDC 呼叫未公開的 Gen2 Cloud Function。
+各來源每 30 分鐘觸發一次，依序錯開 1 分鐘，並使用 OIDC 呼叫未公開的 Gen2 Cloud Function。
+
+| 來源 | 每小時執行分鐘 |
+| --- | --- |
+| CHINATIMES | 00、30 |
+| CNA | 01、31 |
+| CTI | 02、32 |
+| CTS | 03、33 |
+| EBC | 04、34 |
+| ETTODAY | 05、35 |
+| FTV | 06、36 |
+| LTN | 07、37 |
+| PTS | 08、38 |
+| SET | 09、39 |
+| STORM | 10、40 |
+| TTV | 11、41 |
+| TVBS | 12、42 |
+| UDN | 13、43 |
+
+例如中時的 cron 為 `0,30 * * * *`，聯合新聞網為 `13,43 * * * *`。
+既有排程只更新執行時間與說明，保留 URL、OIDC、時區、330 秒逾時、重試及啟用／暫停狀態；新建排程使用 `Etc/UTC` 與 330 秒逾時。
+預設專案為 `square-news-483901`、區域為 `asia-east1`，可透過 `PROJECT_ID`、`REGION` 覆寫，新建排程的 OIDC 帳號可透過 `SERVICE_ACCOUNT` 指定。
+後台 `/admin/crawlers` 會在每分鐘同步時讀取最新排程；監控同步頻率維持每分鐘，與爬取頻率分開。
