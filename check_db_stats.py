@@ -3,7 +3,7 @@ import os
 
 # API 設定
 API_BASE = 'https://square-news-632027619686.asia-east1.run.app/ingest'
-API_KEY = 'temporary-api-key-123'
+API_KEY = os.getenv('API_KEY', '')  # 請用環境變數提供，不要寫進 repo
 
 def check_db():
     print("=== 正在檢查後端資料庫狀態 ===")

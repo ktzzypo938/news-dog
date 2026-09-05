@@ -113,7 +113,17 @@ python3 scrapers/runner/analyze_all.py
 先確認 `scrapers/deploy_runner.sh` 裡的環境變數：
 
 - `INGEST_API_BASE`: 後端 ingest API 基礎路徑
-- `API_KEY`: ingest API key
+- `API_KEY`: ingest API key。**不再有預設值**，部署前必須 `export API_KEY=...`（與後端 `APP_API_KEY` 相同）
+- `SCRAPER_LOOKBACK_DAYS`: 允許送入「今天往前幾天」的文章，預設 1（今天＋昨天），用來補回跨日前沒抓到的稿
+
+### 執行結果判讀
+
+Cloud Function 的回應碼會反映來源健康狀態，方便 Cloud Scheduler / 監控發現壞掉的來源：
+
+- `200`：正常，或本輪沒有新文章（訊息開頭若是 `WARNING:` 代表部分文章解析失敗）
+- `500`：列表頁抓不到任何 URL，或有新 URL 但一篇都沒成功送入（selector 失效、被擋、ingest API 壞掉）
+
+每輪結束會印一行 `[CODE] SUMMARY listed=.. new=.. ingested=.. skipped_date=.. skipped_cached=.. failed=..`，可直接做 log-based metric。
 - `REGION`: Cloud Functions 區域
 
 部署所有來源：

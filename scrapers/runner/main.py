@@ -8,6 +8,10 @@
   1. 在 sources.yml 加一筆設定
   2. 在 sources/ 目錄建立 {module}.py（實作 get_list_urls / scrape_article）
   3. 在 deploy_runner.sh 加一行部署指令
+
+回應碼約定（讓 Cloud Scheduler / 監控看得出來源壞掉）：
+  200  正常，或本輪沒有新文章
+  500  列表頁抓不到任何 URL、或有 2 篇以上新 URL 但一篇都沒成功送入
 """
 import os
 import importlib
@@ -20,6 +24,22 @@ import base
 
 def load_config():
     return base.load_sources_config()
+
+
+def evaluate_run(stats):
+    """依統計決定回應碼與訊息。"""
+    if stats['listed'] == 0:
+        return 500, "ERROR: list page returned no URLs (selector or site change?)"
+    # 全部新文章都失敗才視為來源壞掉；只有 1 篇失敗可能是影音頁沒內文，只給 WARNING
+    if stats['new'] >= 2 and stats['ingested'] == 0 and stats['skipped_date'] == 0:
+        return 500, (f"ERROR: {stats['new']} new URLs but none ingested "
+                     f"(failed={stats['failed']}; article parser or ingest API broken?)")
+    msg = (f"Successfully processed {stats['ingested']} articles "
+           f"(listed={stats['listed']}, new={stats['new']}, skipped_date={stats['skipped_date']}, "
+           f"skipped_cached={stats['skipped_cached']}, failed={stats['failed']})")
+    if stats['failed'] > 0:
+        msg = "WARNING: " + msg
+    return 200, msg
 
 
 @functions_framework.http
@@ -56,6 +76,8 @@ def run_scraper(request):
         return f"Cannot load module 'sources.{module_name}': {e}", 500
 
     print(f"Starting {source_code} ({source_cfg['name']}) scraper...")
-    count = base.run_source(session, source_code, source_module)
+    stats = base.run_source(session, source_code, source_module)
 
-    return f"Successfully processed {count} articles from {source_code}", 200
+    status, message = evaluate_run(stats)
+    print(f"[{source_code}] {message}")
+    return f"{message} from {source_code}", status

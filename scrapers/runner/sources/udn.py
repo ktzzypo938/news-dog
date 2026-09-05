@@ -15,7 +15,9 @@ def get_list_urls(session):
             resp = session.get(list_url, timeout=15)
             soup = BeautifulSoup(resp.text, 'lxml')
             for a in soup.select('div.story-list__text h2 a'):
-                href = a['href']
+                href = a.get('href')
+                if not href:
+                    continue
                 full_url = "https://udn.com" + href.split('?')[0].split('#')[0].rstrip('/')
                 all_urls.append(full_url)
         except Exception as e:
@@ -25,8 +27,9 @@ def get_list_urls(session):
 
 def scrape_article(session, url):
     try:
-        resp = session.get(url, timeout=20)
-        resp.encoding = 'utf-8'
+        resp = base.get_page(session, url, timeout=20, source_code=SOURCE_CODE)
+        if resp is None:
+            return None
         soup = BeautifulSoup(resp.text, 'lxml')
 
         image_url = base.extract_image_url(soup)

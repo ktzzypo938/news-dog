@@ -94,8 +94,9 @@ def get_list_urls(session):
 
 def scrape_article(session, url):
     try:
-        resp = session.get(url, timeout=20)
-        resp.encoding = 'utf-8'
+        resp = base.get_page(session, url, timeout=20, source_code=SOURCE_CODE)
+        if resp is None:
+            return None
         soup = BeautifulSoup(resp.text, 'lxml')
 
         # 頻道判斷擺最前面：VIP／評論不收，省下後面所有解析
@@ -218,10 +219,10 @@ def _extract_clean_text(content_node):
 
 
 def _clean_text(text):
+    """逐行整理空白並保留換行；整篇壓成一行會讓 base.sanitize_clean_text 的逐行規則失去意義。"""
     if not text:
         return ""
 
-    text = re.sub(r'\s+', ' ', text).strip()
     for marker in [
         '更多風傳媒獨家內幕：',
         '更多風傳媒報導：',
@@ -230,8 +231,14 @@ def _clean_text(text):
         '責任編輯：',
     ]:
         if marker in text:
-            text = text.split(marker, 1)[0].strip()
-    return text
+            text = text.split(marker, 1)[0]
+
+    lines = []
+    for line in str(text).splitlines():
+        clean = re.sub(r'[ \t\u3000\xa0]+', ' ', line).strip()
+        if clean:
+            lines.append(clean)
+    return "\n".join(lines)
 
 
 def _extract_photographer(soup):

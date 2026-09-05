@@ -49,8 +49,9 @@ def scrape_article(session, url):
     try:
         _ensure_headers(session)
         normalized_url = _normalize_url(url)
-        resp = session.get(normalized_url, timeout=20)
-        resp.encoding = 'utf-8'
+        resp = base.get_page(session, normalized_url, timeout=20, source_code=SOURCE_CODE)
+        if resp is None:
+            return None
         soup = BeautifulSoup(resp.text, 'lxml')
 
         canonical = _extract_canonical_url(soup) or normalized_url
@@ -61,7 +62,8 @@ def scrape_article(session, url):
         image_url = base.extract_image_url(soup)
 
         content_node = (
-            soup.select_one('#news_detail_div')
+            soup.select_one('div.article-editor-content')   # 2026-07 改版後的內文容器
+            or soup.select_one('#news_detail_div')
             or soup.select_one('div[itemprop="articleBody"]')
             or soup.select_one('.article_content')
         )
@@ -164,8 +166,9 @@ def _extract_clean_text(content_node):
         marker.decompose()
 
     for tag in content.select(
-        'script, style, iframe, img, '
+        'script, style, iframe, img, figure, '
         '.ad_pc, .ad_mo, .adsbox, .guangxuan, .widely_declared, '
+        '.inline-pc-ad-wrapper, .inline-mobile-ad-wrapper, '
         '.article_ad, .article_community, div[align="center"]'
     ):
         tag.decompose()

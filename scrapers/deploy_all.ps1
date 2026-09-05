@@ -1,7 +1,11 @@
 # 相容舊入口：實際部署請使用統一 runner 架構。
 
 $INGEST_API_BASE = if ($env:INGEST_API_BASE) { $env:INGEST_API_BASE } else { "https://square-news-632027619686.asia-east1.run.app/ingest" }
-$API_KEY = if ($env:API_KEY) { $env:API_KEY } else { "temporary-api-key-123" }
+if (-not $env:API_KEY) {
+    Write-Error "請先設定環境變數 API_KEY（後端 ingest/admin API 的 X-API-KEY）再執行部署。"
+    exit 1
+}
+$API_KEY = $env:API_KEY
 $REGION = if ($env:REGION) { $env:REGION } else { "asia-east1" }
 
 $sources = @("TVBS", "PTS", "EBC", "ETTODAY", "CHINATIMES", "TTV", "UDN", "CTS", "LTN", "FTV", "STORM", "SET", "CNA", "CTI")
@@ -25,7 +29,7 @@ try {
             --entry-point run_scraper `
             --no-allow-unauthenticated `
             --region $REGION `
-            --set-env-vars "INGEST_API_BASE=$INGEST_API_BASE,API_KEY=$API_KEY,SOURCE_CODE=$source,SCRAPER_ONLY_TODAY=true,SCRAPER_TIMEZONE=Asia/Taipei" `
+            --update-env-vars "INGEST_API_BASE=$INGEST_API_BASE,API_KEY=$API_KEY,SOURCE_CODE=$source,SCRAPER_ONLY_TODAY=true,SCRAPER_LOOKBACK_DAYS=1,SCRAPER_TIMEZONE=Asia/Taipei" `
             --memory $memory `
             --timeout 300s `
             --max-instances 1

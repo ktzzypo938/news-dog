@@ -60,8 +60,9 @@ def scrape_article(session, url):
     try:
         _ensure_headers(session)
         normalized_url = _normalize_url(url)
-        resp = session.get(normalized_url, timeout=20)
-        resp.encoding = 'utf-8'
+        resp = base.get_page(session, normalized_url, timeout=20, source_code=SOURCE_CODE)
+        if resp is None:
+            return None
         soup = BeautifulSoup(resp.text, 'lxml')
         article_ld = _extract_article_ld(soup) or {}
 

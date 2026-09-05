@@ -44,8 +44,9 @@ def get_list_urls(session):
 
 def scrape_article(session, url):
     try:
-        resp = session.get(url, timeout=20)
-        resp.encoding = 'utf-8'
+        resp = base.get_page(session, url, timeout=20, source_code=SOURCE_CODE)
+        if resp is None:
+            return None
         soup = BeautifulSoup(resp.text, 'lxml')
 
         canonical = _extract_canonical_url(soup) or _normalize_url(url)

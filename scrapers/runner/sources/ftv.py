@@ -185,7 +185,7 @@ def _candidate_article_ids(target_date):
             yield f'{prefix}{marker}{i:02d}M1'
 
 
-def _fetch_api_article(session, article_id, target_date):
+def _fetch_api_article(session, article_id, target_date=None):
     try:
         resp = session.get(
             f'{API_BASE_URL}/getNewsVideoUrl.aspx',
@@ -207,13 +207,18 @@ def _fetch_api_article(session, article_id, target_date):
     if not title or not description:
         return None
 
+    published_at = _published_at_from_article_id(article_id)
+    if not published_at:
+        return None
+
     url = f'{BASE_URL}/news/detail/{article_id}'
     article = {
         "source": SOURCE_CODE,
         "url": url,
         "title": title,
-        "publishedAt": _fallback_published_at(target_date),
+        "publishedAt": published_at,
         "rawHtml": "",
+        # API 只有 Description（約 100 字導讀），沒有全文；這是 Cloudflare 擋住文章頁時的降級內容
         "cleanText": description,
     }
     image_url = item.get('Image')
@@ -234,12 +239,28 @@ def _extract_article_id(url):
     return match.group(1) if match else None
 
 
-def _fallback_published_at(target_date):
+_ARTICLE_ID_DATE_RE = re.compile(r'^(\d{4})(\d{1,2})(\d{2})[A-Z]')
+
+
+def _published_at_from_article_id(article_id):
+    """民視文章 ID 本身帶日期（2026904W0748 = 2026-09-04），日期以此為準。
+
+    API 沒有發布時間，只能補時間部分：ID 日期是今天時用現在時間（fallback 掃描每 15 分鐘一輪，
+    誤差在一輪之內）；不是今天的一律 00:00:00，絕不把舊文標成現在。
+    """
+    m = _ARTICLE_ID_DATE_RE.match(article_id or '')
+    if not m:
+        return None
     try:
-        now = datetime.now(ZoneInfo(base.SCRAPER_TIMEZONE)).strftime('%H:%M:%S')
+        day = datetime(int(m.group(1)), int(m.group(2)), int(m.group(3))).date()
+    except ValueError:
+        return None
+    try:
+        now = datetime.now(ZoneInfo(base.SCRAPER_TIMEZONE))
     except Exception:
-        now = '00:00:00'
-    return f'{target_date} {now}'
+        now = datetime.now()
+    time_part = now.strftime('%H:%M:%S') if day == now.date() else '00:00:00'
+    return f'{day.isoformat()} {time_part}'
 
 
 def _infer_category(article):

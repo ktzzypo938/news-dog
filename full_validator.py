@@ -22,7 +22,7 @@ def test_scraper_full(source_name, folder):
     
     # 設定模擬環境變數
     os.environ['INGEST_API_BASE'] = 'http://mock-api/ingest'
-    os.environ['API_KEY'] = 'temporary-api-key-123'
+    os.environ.setdefault('API_KEY', '')  # 請在執行前 export API_KEY，不要寫進 repo
     
     spec.loader.exec_module(module)
     

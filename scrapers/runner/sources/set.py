@@ -5,59 +5,67 @@ import base
 
 SOURCE_CODE = 'SET'
 GROUP_IDS = ['6', '41', '4', '5']  # 政治、社會、生活、國際
+# 舊網址 ViewAll.aspx?PageGroupID=N 已 301 到這裡；直接打新網址省一次轉址
+LIST_URL = 'https://www.setn.com/viewallbypgid/{group_id}'
+ARTICLE_RE = re.compile(r'^https://www\.setn\.com/news/\d+$')
+
+# 分類頁的專屬列表容器。頁面其他區塊（熱門、焦點、側欄）是全站共用的，
+# 會混進娛樂／體育，所以絕不能退回「整頁所有 /news/ 連結」的寬鬆抓法。
+LIST_SELECTORS = (
+    'div.about_news_list_content a[href]',
+    'div.news_list_area a[href]',
+    'h3.view-li-title a',      # 舊版
+    'div.view-li-title a',     # 舊版
+)
 
 
 def get_list_urls(session):
     all_urls = []
     for group_id in GROUP_IDS:
-        list_url = f'https://www.setn.com/ViewAll.aspx?PageGroupID={group_id}'
+        list_url = LIST_URL.format(group_id=group_id)
         try:
             resp = session.get(list_url, timeout=15)
+            resp.encoding = 'utf-8'
             soup = BeautifulSoup(resp.text, 'lxml')
 
-            links = (soup.select('h3.view-li-title a')
-                     or soup.select('div.view-li-title a')
-                     or soup.select('div.newsItems h3 a')
-                     or soup.select('a[href*="/News.aspx"], a[href*="/news/"]'))
+            links = []
+            for selector in LIST_SELECTORS:
+                links = soup.select(selector)
+                if links:
+                    break
+            if not links:
+                print(f"[{SOURCE_CODE}] WARNING: no list container matched on group {group_id} (site changed?)")
+                continue
 
-            print(f"[{SOURCE_CODE}] Found {len(links)} links in group {group_id}")
-
+            found = 0
             for a in links:
                 href = a.get('href', '')
                 if not href:
                     continue
                 full_url = href if href.startswith('http') else "https://www.setn.com" + href
-                # 舊格式：/News.aspx?NewsID=123（保留 NewsID 參數）
+                # 舊格式：/News.aspx?NewsID=123（保留 NewsID 參數，與後端 normalizeUrl 一致）
                 m = re.search(r'NewsID=(\d+)', full_url)
                 if m:
                     all_urls.append(f"https://www.setn.com/News.aspx?NewsID={m.group(1)}")
+                    found += 1
                     continue
                 # 新格式：/news/1879418
                 full_url = full_url.split('?')[0].split('#')[0].rstrip('/')
-                if re.match(r'^https://www\.setn\.com/news/\d+$', full_url):
+                if ARTICLE_RE.match(full_url):
                     all_urls.append(full_url)
+                    found += 1
+            print(f"[{SOURCE_CODE}] Found {found} article links in group {group_id}")
         except Exception as e:
             print(f"[{SOURCE_CODE}] Failed to fetch group {group_id}: {e}")
 
-    # 備用：若分類頁抓取量不足，從首頁補充
-    if len(all_urls) < 5:
-        print(f"[{SOURCE_CODE}] Warning: Only {len(all_urls)} URLs from categories, trying homepage...")
-        try:
-            resp = session.get('https://www.setn.com/', timeout=15)
-            for news_id in set(re.findall(r'NewsID=(\d+)', resp.text)):
-                all_urls.append(f"https://www.setn.com/News.aspx?NewsID={news_id}")
-            for news_id in set(re.findall(r'setn\.com/news/(\d+)', resp.text)):
-                all_urls.append(f"https://www.setn.com/news/{news_id}")
-        except Exception as e:
-            print(f"[{SOURCE_CODE}] Failed to fetch homepage: {e}")
-
-    return all_urls
+    return list(dict.fromkeys(all_urls))
 
 
 def scrape_article(session, url):
     try:
-        resp = session.get(url, timeout=20)
-        resp.encoding = 'utf-8'
+        resp = base.get_page(session, url, timeout=20, source_code=SOURCE_CODE)
+        if resp is None:
+            return None
         soup = BeautifulSoup(resp.text, 'lxml')
 
         image_url = base.extract_image_url(soup)

@@ -7,17 +7,27 @@ import re
 import importlib
 import requests
 import yaml
-from datetime import datetime
+from datetime import datetime, timedelta
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from dateutil import parser
 from zoneinfo import ZoneInfo
 
 INGEST_API_BASE = os.getenv('INGEST_API_BASE', 'https://square-news-632027619686.asia-east1.run.app/ingest')
-API_KEY = os.getenv('API_KEY', 'temporary-api-key-123')
+API_KEY = os.getenv('API_KEY', '')  # 不再內建預設 key；部署與本地測試都必須用環境變數提供
 SCRAPER_ONLY_TODAY = os.getenv('SCRAPER_ONLY_TODAY', 'true').strip().lower() not in ('0', 'false', 'no')
 SCRAPER_TARGET_DATE = os.getenv('SCRAPER_TARGET_DATE')
 SCRAPER_TIMEZONE = os.getenv('SCRAPER_TIMEZONE', 'Asia/Taipei')
+# 允許送入的日期範圍：今天往前再看幾天（預設 1 = 今天+昨天，補回跨日前沒抓到的文章）
+try:
+    SCRAPER_LOOKBACK_DAYS = max(0, int(os.getenv('SCRAPER_LOOKBACK_DAYS', '1') or 0))
+except ValueError:
+    SCRAPER_LOOKBACK_DAYS = 1
+
+# 同一個暖機實例內記住「確認不需要再抓」的 URL（過期舊文、404/410），
+# 避免列表頁釘選的舊文每 15 分鐘被重新下載一次。冷啟動會清空，屬可接受。
+SKIP_URL_CACHE = {}
+SKIP_URL_CACHE_MAX = 5000
 
 COMMON_TIME_SELECTORS = [
     ('meta[property="article:published_time"]', 'content'),
@@ -70,6 +80,9 @@ def iter_enabled_sources():
 
 def get_new_urls(session, source_code, urls):
     """呼叫後端 API 檢查哪些 URL 尚未爬取（API 呼叫固定啟用 SSL 驗證）"""
+    if not API_KEY:
+        print(f"[{source_code}] ERROR: API_KEY 未設定，無法呼叫 ingest API")
+        return []
     try:
         resp = session.post(
             f"{INGEST_API_BASE}/check-urls",
@@ -102,7 +115,12 @@ def ingest_article(session, data):
 
 
 def parse_datetime(value):
-    """將各來源時間格式統一成後端使用的 yyyy-MM-dd HH:mm:ss。"""
+    """將各來源時間格式統一成後端使用的 yyyy-MM-dd HH:mm:ss。
+
+    時區處理：直接取牆上時間、忽略 tz 標記。台灣新聞站的 meta 時間都是台灣時間，
+    但 TVBS 標成 Z、三立標成 +00:00（實際仍是台灣時間，已對照列表頁確認），
+    所以不能做 astimezone 轉換。若未來有來源改成真正的 UTC，需在該來源模組自行加 8 小時。
+    """
     if not value:
         return None
     try:
@@ -111,23 +129,67 @@ def parse_datetime(value):
         return None
 
 
+def _today():
+    try:
+        return datetime.now(ZoneInfo(SCRAPER_TIMEZONE)).date()
+    except Exception:
+        return datetime.now().date()
+
+
 def get_target_date():
-    """取得本次允許送入的日期（yyyy-MM-dd）。"""
+    """取得本次的基準日期（yyyy-MM-dd），通常是台灣時間的今天。"""
     if SCRAPER_TARGET_DATE:
         return SCRAPER_TARGET_DATE
-    try:
-        return datetime.now(ZoneInfo(SCRAPER_TIMEZONE)).date().isoformat()
-    except Exception:
-        return datetime.now().date().isoformat()
+    return _today().isoformat()
 
 
-def should_ingest_published_at(published_at, target_date=None):
-    """Cloud Function 預設只送入今天的文章，避免來源列表頁把舊文補進 DB。"""
+def get_target_dates():
+    """取得本次允許送入的日期集合：基準日往前 SCRAPER_LOOKBACK_DAYS 天。"""
+    if SCRAPER_TARGET_DATE:
+        try:
+            base_day = datetime.fromisoformat(SCRAPER_TARGET_DATE).date()
+        except Exception:
+            return {SCRAPER_TARGET_DATE}
+    else:
+        base_day = _today()
+    return {(base_day - timedelta(days=i)).isoformat() for i in range(SCRAPER_LOOKBACK_DAYS + 1)}
+
+
+def should_ingest_published_at(published_at, target_dates=None):
+    """Cloud Function 預設只送入近期（今天+回看天數）的文章，避免列表頁釘選的舊文補進 DB。
+
+    注意：publishedAt 已由 parse_datetime 去掉時區，這裡是純字串日期比對。
+    """
     if not SCRAPER_ONLY_TODAY:
         return True
     if not published_at:
         return False
-    return str(published_at).startswith(target_date or get_target_date())
+    if isinstance(target_dates, str):          # 相容舊呼叫方式（單一日期字串）
+        target_dates = {target_dates}
+    return str(published_at)[:10] in (target_dates or get_target_dates())
+
+
+def remember_skip(url, reason):
+    """把確認不用再抓的 URL 記進實例快取。"""
+    if len(SKIP_URL_CACHE) >= SKIP_URL_CACHE_MAX:
+        SKIP_URL_CACHE.clear()
+    SKIP_URL_CACHE[url] = reason
+
+
+def get_page(session, url, timeout=20, source_code='-'):
+    """抓文章頁。4xx/5xx 一律視為失敗回 None，不再把錯誤頁當文章解析；404/410 記入 skip cache。"""
+    try:
+        resp = session.get(url, timeout=timeout)
+    except requests.exceptions.ContentDecodingError:
+        # 中天的 410 頁宣稱 gzip 但內容不是，requests 會直接丟例外；改用 identity 重抓拿真正的狀態碼
+        resp = session.get(url, timeout=timeout, headers={'Accept-Encoding': 'identity'})
+    if resp.status_code >= 400:
+        print(f"[{source_code}] HTTP {resp.status_code} for {url}")
+        if resp.status_code in (404, 410):
+            remember_skip(url, f'http{resp.status_code}')
+        return None
+    resp.encoding = 'utf-8'
+    return resp
 
 
 def extract_published_at(soup, selectors=None):
@@ -210,6 +272,18 @@ _PROMO_LINE_RES = [
     re.compile(r'^\d+\s*小時前$'),                 # 推薦卡片殘留的相對時間
 ]
 
+# 推廣行幾乎都是短句且不以句號結尾；正文段落一旦提到「下載App」「加入LINE群組」「追蹤頻道」
+# 不能因此整段被砍，所以 _PROMO_LINE_RES 只套用在短行、且不以句末標點結尾的行。
+_PROMO_LINE_MAX_LEN = 40
+_PROMO_BULLET_MAX_LEN = 60
+_SENTENCE_END_RE = re.compile(r'[。！？!?]$')
+
+
+def _looks_like_promo_line(line):
+    if len(line) > _PROMO_LINE_MAX_LEN or _SENTENCE_END_RE.search(line):
+        return False
+    return any(p.search(line) for p in _PROMO_LINE_RES)
+
 
 def sanitize_clean_text(text):
     """移除 cleanText 中的推薦閱讀、廣告、社群推廣等非本文行（所有來源統一套用）。"""
@@ -227,9 +301,11 @@ def sanitize_clean_text(text):
             if i >= total * 0.6:
                 break
             continue  # 出現在前中段時僅刪標頭行
-        if _PROMO_BULLET_RE.match(line):
+        # 推薦連結行 = 符號開頭的短標題，不會以句號結尾；「▶專家指出…。」這種正文段落要留下
+        if (_PROMO_BULLET_RE.match(line) and len(line) <= _PROMO_BULLET_MAX_LEN
+                and not _SENTENCE_END_RE.search(line)):
             continue
-        if any(p.search(line) for p in _PROMO_LINE_RES):
+        if _looks_like_promo_line(line):
             continue
         out.append(line)
     return "\n".join(out)
@@ -238,10 +314,20 @@ def sanitize_clean_text(text):
 # DOM 層通用雜訊 selector（各來源共用，在 get_text 前呼叫）
 _JUNK_SELECTOR = (
     'script, style, iframe, noscript, aside, '
-    '[class*="ad-"], [class*="-ad"], [id*="google_ads"], '
+    '[id*="google_ads"], '
     '[class*="related"], [class*="recommend"], [class*="promo"], '
     '[class*="social"], [class*="share"], [class*="fb-"]'
 )
+# 廣告 class 用「token」比對：ad / ads / ad-xxx / xxx-ad / ad_pc 會中，
+# read-more / head-line / load-more / thread 這種只是含 "ad" 子字串的正文 class 不會中。
+_AD_CLASS_TOKEN_RE = re.compile(
+    r'(?:^|[-_])(?:ad|ads|adv|advert|adverts|advertise|advertisement|advertising|adsense|dfp|sponsor|sponsored)(?:[-_]|$)',
+    re.IGNORECASE,
+)
+
+
+def _is_ad_element(tag):
+    return any(_AD_CLASS_TOKEN_RE.search(cls) for cls in (tag.get('class') or []))
 
 
 def remove_promo_blocks(content_node):
@@ -255,6 +341,9 @@ def remove_promo_blocks(content_node):
         return
     for tag in content_node.select(_JUNK_SELECTOR):
         tag.decompose()
+    for tag in [t for t in content_node.find_all(True) if _is_ad_element(t)]:
+        if _is_alive(tag):
+            tag.decompose()
 
     for el in content_node.find_all(['div', 'section', 'ul', 'ol', 'p']):
         if not el.parent:      # 已隨外層一起被移除
@@ -268,6 +357,11 @@ def remove_promo_blocks(content_node):
         link_text_len = sum(len(a.get_text(strip=True)) for a in links)
         if link_text_len / len(text) > 0.75:
             el.decompose()
+
+
+def _is_alive(tag):
+    """decompose 過的節點 parent 會是 None；巢狀廣告區塊只需刪最外層。"""
+    return tag.parent is not None
 
 
 def extract_photographer(text):
@@ -331,19 +425,27 @@ def run_source(session, source_code, source_module):
     1. 取得文章 URL 列表
     2. 過濾已爬取的 URL
     3. 爬取並送入後端
-    返回成功數量
+    返回統計 dict：listed / new / skipped_cached / ingested / skipped_date / failed
     """
+    stats = {'listed': 0, 'new': 0, 'skipped_cached': 0, 'ingested': 0,
+             'skipped_date': 0, 'failed': 0}
     all_urls = source_module.get_list_urls(session)
 
     if not all_urls:
-        print(f"[{source_code}] No URLs found")
-        return 0
+        print(f"[{source_code}] ERROR: No URLs found")
+        return stats
 
     unique_urls = list(dict.fromkeys(all_urls))
+    stats['listed'] = len(unique_urls)
     new_urls = get_new_urls(session, source_code, unique_urls)
-    print(f"[{source_code}] Found {len(new_urls)} new URLs out of {len(unique_urls)}")
+    cached = [u for u in new_urls if u in SKIP_URL_CACHE]
+    new_urls = [u for u in new_urls if u not in SKIP_URL_CACHE]
+    stats['new'] = len(new_urls)
+    stats['skipped_cached'] = len(cached)
+    print(f"[{source_code}] Found {len(new_urls)} new URLs out of {len(unique_urls)}"
+          + (f" ({len(cached)} skipped by cache)" if cached else ""))
 
-    target_date = get_target_date() if SCRAPER_ONLY_TODAY else None
+    target_dates = get_target_dates() if SCRAPER_ONLY_TODAY else None
     success_count = 0
     skipped_outside_date = 0
     for url in new_urls:
@@ -361,8 +463,9 @@ def run_source(session, source_code, source_module):
         if not article_data.get('publishedAt'):
             print(f"[{source_code}] Skipping {url}: Missing publishedAt")
             continue
-        if not should_ingest_published_at(article_data.get('publishedAt'), target_date):
+        if not should_ingest_published_at(article_data.get('publishedAt'), target_dates):
             skipped_outside_date += 1
+            remember_skip(url, 'outside-date')
             continue
         if ingest_article(session, article_data):
             success_count += 1
@@ -370,6 +473,11 @@ def run_source(session, source_code, source_module):
             print(f"[{source_code}] Failed to ingest: {url}")
 
     if skipped_outside_date:
-        print(f"[{source_code}] Skipped {skipped_outside_date} URLs outside target date {target_date}")
+        print(f"[{source_code}] Skipped {skipped_outside_date} URLs outside target dates {sorted(target_dates)}")
 
-    return success_count
+    stats['ingested'] = success_count
+    stats['skipped_date'] = skipped_outside_date
+    stats['failed'] = max(0, stats['new'] - success_count - skipped_outside_date)
+    print(f"[{source_code}] SUMMARY listed={stats['listed']} new={stats['new']} ingested={stats['ingested']} "
+          f"skipped_date={stats['skipped_date']} skipped_cached={stats['skipped_cached']} failed={stats['failed']}")
+    return stats
