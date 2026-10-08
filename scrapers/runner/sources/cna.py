@@ -51,7 +51,7 @@ def scrape_article(session, url):
             for tag in content_node.select('script, style, .article-ads, .more-news'):
                 tag.decompose()
             base.remove_promo_blocks(content_node)
-            clean_text = content_node.get_text("\n", strip=True)
+            clean_text = base.block_text(content_node)
         else:
             clean_text = ""
 

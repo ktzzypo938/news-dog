@@ -429,6 +429,23 @@ def _is_alive(tag):
     return tag.parent is not None
 
 
+_INLINE_TAGS = ['a', 'strong', 'b', 'em', 'i', 'u', 'span', 'font', 'mark', 'small', 'sup', 'sub']
+
+
+def block_text(content_node):
+    """取內文文字，只在段落等區塊之間換行。
+
+    get_text("\n") 會在每個文字節點之間換行，內文裡的連結與粗體（例如 UDN 的人名標籤
+    <a class="tag"><strong>徐佳青</strong></a>）會被切成獨立一行，後端擷取段落時句子就斷在中間、
+    主詞被丟掉。先拆掉行內標籤、合併相鄰文字，再以換行串接。要在 remove_promo_blocks 之後呼叫，
+    它靠連結密度判斷推薦區。
+    """
+    for tag in content_node.find_all(_INLINE_TAGS):
+        tag.unwrap()
+    content_node.smooth()
+    return content_node.get_text("\n", strip=True)
+
+
 def extract_photographer(text):
     """從圖片說明文字中提取攝影師署名（整合所有來源的正則模式）"""
     if not text:
