@@ -34,8 +34,12 @@ CATEGORIES = {
 MAX_URLS_PER_CATEGORY = 30
 MAX_CANDIDATES_PER_CATEGORY = 45
 MAX_TAG_PAGES = 3
-MAX_FALLBACK_WEB_IDS = 320
+MAX_FALLBACK_WEB_IDS = 1200
 MAX_FALLBACK_VIDEO_IDS = 40
+# 編號不連號：實測單日最大空號 11 個（一天約 500 篇、編到 W0730 左右），連續 30 個查無資料就當作掃到最新一篇
+MAX_CONSECUTIVE_MISSING_IDS = 30
+# 文章 ID 的月份只佔一碼：1–9 月用數字，10–12 月用 A–C（2026A08W0001 = 2026-10-08）
+ID_MONTH_CODES = '123456789ABC'
 ARTICLE_RE = re.compile(r'^https://www\.ftvnews\.com\.tw/news/detail/[A-Za-z0-9]+$')
 ARTICLE_ID_RE = re.compile(r'/news/detail/([A-Za-z0-9]+)$')
 URL_CATEGORY_MAP = {}
@@ -151,10 +155,7 @@ def _fetch_fallback_urls_from_api(session):
 
     urls = []
     seen = set()
-    for article_id in _candidate_article_ids(target_date):
-        article = _fetch_api_article(session, article_id, target_date)
-        if not article:
-            continue
+    for article in _scan_api_articles(session, target_date):
         category = _infer_category(article)
         if not category:
             continue
@@ -171,21 +172,45 @@ def _fetch_fallback_urls_from_api(session):
     return urls
 
 
-def _candidate_article_ids(target_date):
+def _scan_api_articles(session, target_date):
+    """依編號順序逐一查 API；每個序列連續 MAX_CONSECUTIVE_MISSING_IDS 個查無資料就換下一個序列。"""
+    for article_ids in _candidate_id_series(target_date):
+        missing = 0
+        for article_id in article_ids:
+            item = _fetch_api_item(session, article_id)
+            if not item:
+                missing += 1
+                if missing >= MAX_CONSECUTIVE_MISSING_IDS:
+                    break
+                continue
+            missing = 0
+            article = _article_from_api_item(article_id, item)
+            if article:
+                yield article
+
+
+def _candidate_id_series(target_date):
     try:
         date = datetime.fromisoformat(target_date).date()
     except Exception:
         date = datetime.now(ZoneInfo(base.SCRAPER_TIMEZONE)).date()
 
-    prefix = f'{date.year}{date.month}{date.day:02d}'
-    for i in range(1, MAX_FALLBACK_WEB_IDS + 1):
-        yield f'{prefix}W{i:04d}'
+    prefix = _article_id_prefix(date)
+    yield (f'{prefix}W{i:04d}' for i in range(1, MAX_FALLBACK_WEB_IDS + 1))
     for marker in ('P', 'U'):
-        for i in range(1, MAX_FALLBACK_VIDEO_IDS + 1):
-            yield f'{prefix}{marker}{i:02d}M1'
+        yield (f'{prefix}{marker}{i:02d}M1' for i in range(1, MAX_FALLBACK_VIDEO_IDS + 1))
 
 
-def _fetch_api_article(session, article_id, target_date=None):
+def _article_id_prefix(date):
+    return f'{date.year}{ID_MONTH_CODES[date.month - 1]}{date.day:02d}'
+
+
+def _fetch_api_article(session, article_id):
+    item = _fetch_api_item(session, article_id)
+    return _article_from_api_item(article_id, item) if item else None
+
+
+def _fetch_api_item(session, article_id):
     try:
         resp = session.get(
             f'{API_BASE_URL}/getNewsVideoUrl.aspx',
@@ -200,8 +225,10 @@ def _fetch_api_article(session, article_id, target_date=None):
 
     if data.get('Status') != 'Success' or not data.get('ITEM'):
         return None
+    return data['ITEM'][0]
 
-    item = data['ITEM'][0]
+
+def _article_from_api_item(article_id, item):
     title = _clean_text(item.get('Title', ''))
     description = _clean_text(item.get('Description', ''))
     if not title or not description:
@@ -231,7 +258,7 @@ def _scrape_article_from_api(session, url):
     article_id = _extract_article_id(url)
     if not article_id:
         return None
-    return _fetch_api_article(session, article_id, base.get_target_date())
+    return _fetch_api_article(session, article_id)
 
 
 def _extract_article_id(url):
@@ -239,20 +266,21 @@ def _extract_article_id(url):
     return match.group(1) if match else None
 
 
-_ARTICLE_ID_DATE_RE = re.compile(r'^(\d{4})(\d{1,2})(\d{2})[A-Z]')
+_ARTICLE_ID_DATE_RE = re.compile(rf'^(\d{{4}})([{ID_MONTH_CODES}])(\d{{2}})[A-Z]')
 
 
 def _published_at_from_article_id(article_id):
-    """民視文章 ID 本身帶日期（2026904W0748 = 2026-09-04），日期以此為準。
+    """民視文章 ID 本身帶日期（2026904W0748 = 2026-09-04、2026A08W0001 = 2026-10-08），日期以此為準。
 
-    API 沒有發布時間，只能補時間部分：ID 日期是今天時用現在時間（fallback 掃描每 15 分鐘一輪，
+    API 沒有發布時間，只能補時間部分：ID 日期是今天時用現在時間（fallback 掃描每 30 分鐘一輪，
     誤差在一輪之內）；不是今天的一律 00:00:00，絕不把舊文標成現在。
     """
     m = _ARTICLE_ID_DATE_RE.match(article_id or '')
     if not m:
         return None
     try:
-        day = datetime(int(m.group(1)), int(m.group(2)), int(m.group(3))).date()
+        month = ID_MONTH_CODES.index(m.group(2)) + 1
+        day = datetime(int(m.group(1)), month, int(m.group(3))).date()
     except ValueError:
         return None
     try:
