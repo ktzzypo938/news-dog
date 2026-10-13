@@ -1,9 +1,12 @@
 """中央通訊社爬蟲"""
+import re
+
 from bs4 import BeautifulSoup
 import base
 
 SOURCE_CODE = 'CNA'
 CAT_CODES = ['aipl', 'asoc', 'ahel', 'aopl']  # 政治、社會、生活、國際
+_TRAILING_DATE_CODE = re.compile(r'(?<=）)\s*\d{7}\s*$')
 
 
 def get_list_urls(session):
@@ -48,10 +51,13 @@ def scrape_article(session, url):
         title = title_node.get_text(strip=True) if title_node else ""
 
         if content_node:
-            for tag in content_node.select('script, style, .article-ads, .more-news'):
+            # .moreArticle 是文末同專題的新聞時間軸（標題＋時間），時間不在連結裡，連結密度判斷清不掉
+            for tag in content_node.select('script, style, .article-ads, .more-news, .moreArticle, '
+                                           '.articlekeywordGroup, .gmailNews'):
                 tag.decompose()
             base.remove_promo_blocks(content_node)
-            clean_text = base.block_text(content_node)
+            # 內文以「（編譯：○○○）1151012」結束，去掉署名後面的七碼民國日期
+            clean_text = _TRAILING_DATE_CODE.sub('', base.block_text(content_node))
         else:
             clean_text = ""
 
