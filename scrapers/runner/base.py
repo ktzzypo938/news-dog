@@ -148,17 +148,21 @@ def ingest_article(session, data):
         return False
 
 
-def parse_datetime(value):
+def parse_datetime(value, respect_timezone=False):
     """將各來源時間格式統一成後端使用的 yyyy-MM-dd HH:mm:ss。
 
-    時區處理：直接取牆上時間、忽略 tz 標記。台灣新聞站的 meta 時間都是台灣時間，
-    但 TVBS 標成 Z、三立標成 +00:00（實際仍是台灣時間，已對照列表頁確認），
-    所以不能做 astimezone 轉換。若未來有來源改成真正的 UTC，需在該來源模組自行加 8 小時。
+    時區處理：預設直接取牆上時間、忽略 tz 標記。三立的 meta 標成 +00:00，
+    實際仍是台灣時間（已對照列表頁確認），所以不能一律做 astimezone 轉換。
+    meta 是真正 UTC 的來源（TVBS，2026-10 對照頁面「發佈時間」確認）傳 respect_timezone=True，
+    帶時區的值會換算成台灣時間；沒有時區的值照舊取牆上時間。
     """
     if not value:
         return None
     try:
-        return parser.parse(str(value).strip()).strftime('%Y-%m-%d %H:%M:%S')
+        parsed = parser.parse(str(value).strip())
+        if respect_timezone and parsed.tzinfo is not None:
+            parsed = parsed.astimezone(ZoneInfo(SCRAPER_TIMEZONE))
+        return parsed.strftime('%Y-%m-%d %H:%M:%S')
     except Exception:
         return None
 
@@ -257,20 +261,23 @@ def _retry_after_seconds(value):
             return 60
 
 
-def extract_published_at(soup, selectors=None):
-    """依通用 meta tag、JSON-LD、來源指定 selector 順序解析發布時間。"""
+def extract_published_at(soup, selectors=None, respect_timezone=False):
+    """依通用 meta tag、JSON-LD、來源指定 selector 順序解析發布時間。
+
+    respect_timezone 見 parse_datetime：meta 時間是真正 UTC 的來源才開。
+    """
     for selector, attr in COMMON_TIME_SELECTORS:
         node = soup.select_one(selector)
         if not node:
             continue
         value = node.get(attr) if attr else node.get_text(strip=True)
-        parsed = parse_datetime(value)
+        parsed = parse_datetime(value, respect_timezone)
         if parsed:
             return parsed
 
     for ld_node in soup.select('script[type="application/ld+json"]'):
         for value in _walk_json_ld_dates(_load_json_ld(ld_node)):
-            parsed = parse_datetime(value)
+            parsed = parse_datetime(value, respect_timezone)
             if parsed:
                 return parsed
 
@@ -279,7 +286,7 @@ def extract_published_at(soup, selectors=None):
         if not node:
             continue
         value = node.get(attr) if attr else node.get_text(strip=True)
-        parsed = parse_datetime(value)
+        parsed = parse_datetime(value, respect_timezone)
         if parsed:
             return parsed
 

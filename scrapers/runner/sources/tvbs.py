@@ -56,9 +56,11 @@ def scrape_article(session, url):
 
         canonical = _extract_canonical_url(soup) or normalized_url
         title = _extract_title(soup)
+        # TVBS 的 meta 時間是真正的 UTC（…Z），要換成台灣時間；
+        # 直接取牆上時間會讓每篇早 8 小時，聚合把事發後的報導誤判成預告稿
         published_at = base.extract_published_at(soup, [
             ('div.author', None),
-        ])
+        ], respect_timezone=True)
         image_url = base.extract_image_url(soup)
 
         content_node = (
